@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Hasil download (jangan push PDF/Excel/CSV ke repo)
+jurnal_download/
+jurnal_download1/
+*.pdf
+*.xlsx
+*.csv
+*.zip
+
+# OS
+.DS_Store
+Thumbs.db
