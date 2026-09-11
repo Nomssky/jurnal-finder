@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 journal_dl.py - Bulk Journal Downloader for Skripsi
-Searches Semantic Scholar + Scopus + ScienceDirect, checks Unpaywall for free PDFs.
+Searches Scopus + ScienceDirect, checks Unpaywall for free PDFs.
 
 Catatan akses institusi (UNDIP):
 - Script ini TIDAK melakukan login SSO (SSO itu login browser/SAML + bisa ada
@@ -23,7 +23,6 @@ from pathlib import Path
 from datetime import datetime
 
 # ── Config ─────────────────────────────────────────────────────────────────
-SEMANTIC_SCHOLAR_API = "https://api.semanticscholar.org/graph/v1/paper/search"
 SCOPUS_SEARCH_API    = "https://api.elsevier.com/content/search/scopus"
 SCIDIR_SEARCH_API    = "https://api.elsevier.com/content/search/sciencedirect"
 ELSEVIER_ARTICLE_API = "https://api.elsevier.com/content/article/doi/{doi}"
@@ -33,12 +32,11 @@ DOWNLOAD_DIR         = Path("./jurnal_download")
 RESULTS_CSV          = "hasil_pencarian.csv"
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (journal-downloader-skripsi/1.0)"}
-S2_API_KEY = ""  # optional: isi kalau punya, https://www.semanticscholar.org/product/api
 # API key gratis Elsevier (untuk Scopus + ScienceDirect): https://dev.elsevier.com
 # Bisa juga via env: export ELSEVIER_API_KEY=xxxx
 ELSEVIER_API_KEY = os.getenv("ELSEVIER_API_KEY", "")
 
-VALID_SOURCES = ("semanticscholar", "scopus", "sciencedirect")
+VALID_SOURCES = ("scopus", "sciencedirect")
 
 # ── Colors (biar CLI nya enak dibaca) ──────────────────────────────────────
 class C:
@@ -54,49 +52,6 @@ def warn(msg):  print(f"{C.YELLOW}⚠{C.RESET} {msg}")
 def err(msg):   print(f"{C.RED}✗{C.RESET} {msg}")
 def info(msg):  print(f"{C.CYAN}→{C.RESET} {msg}")
 def bold(msg):  print(f"{C.BOLD}{msg}{C.RESET}")
-
-# ── Search Semantic Scholar ─────────────────────────────────────────────────
-def search_papers(keyword: str, limit: int = 20, year_start: int = None, year_end: int = None) -> list:
-    info(f"Mencari: '{keyword}' ...")
-
-    params = {
-        "query": keyword,
-        "limit": limit,
-        "fields": "title,authors,year,externalIds,openAccessPdf,abstract,citationCount,publicationTypes,journal"
-    }
-    if year_start and year_end:
-        params["year"] = f"{year_start}-{year_end}"
-    elif year_start:
-        params["year"] = f"{year_start}-"
-
-    headers = dict(HEADERS)
-    if S2_API_KEY:
-        headers["x-api-key"] = S2_API_KEY
-
-    max_retries = 5
-    for attempt in range(max_retries):
-        try:
-            resp = requests.get(SEMANTIC_SCHOLAR_API, params=params, headers=headers, timeout=15)
-            if resp.status_code == 429:
-                wait = 15 * (2 ** attempt)  # 15s, 30s, 60s, 120s, 240s
-                warn(f"Rate limited. Tunggu {wait}s lalu retry ({attempt+1}/{max_retries})...")
-                time.sleep(wait)
-                continue
-            if resp.status_code != 200:
-                err(f"HTTP {resp.status_code} untuk '{keyword}'")
-                return []
-            resp.raise_for_status()
-            data = resp.json()
-            papers = data.get("data", [])
-            ok(f"Ditemukan {len(papers)} paper")
-            return papers
-        except requests.exceptions.RequestException as e:
-            err(f"Gagal search: {e}")
-            if attempt < max_retries - 1:
-                time.sleep(5)
-            continue
-    err(f"Menyerah setelah {max_retries} percobaan untuk: '{keyword}'")
-    return []
 
 # ── Search Scopus / ScienceDirect (Elsevier API) ────────────────────────────
 def _elsevier_headers() -> dict:
@@ -116,7 +71,7 @@ def _elsevier_date(year_start: int = None, year_end: int = None) -> str | None:
     return None
 
 def _norm_elsevier_entry(e: dict, origin: str) -> dict:
-    """Samakan format entry Elsevier dengan format Semantic Scholar agar run() bisa dipakai ulang."""
+    """Samakan format entry Elsevier agar run() bisa dipakai ulang."""
     doi     = e.get("prism:doi")
     title   = e.get("dc:title", "Untitled")
     creator = e.get("dc:creator", "") or ""
@@ -280,7 +235,7 @@ def safe_filename(title: str, year: int = None, max_len: int = 80) -> str:
 
 # ── Main Logic ──────────────────────────────────────────────────────────────
 def run(keywords: list[str], limit: int, year_start: int, year_end: int, email: str,
-        sources: list[str] | tuple = ("semanticscholar",), elsevier_key: str = None):
+        sources: list[str] | tuple = ("scopus", "sciencedirect"), elsevier_key: str = None):
     global UNPAYWALL_EMAIL, ELSEVIER_API_KEY
     if email:
         UNPAYWALL_EMAIL = email
@@ -288,8 +243,6 @@ def run(keywords: list[str], limit: int, year_start: int, year_end: int, email: 
         ELSEVIER_API_KEY = elsevier_key
 
     searchers = []
-    if "semanticscholar" in sources:
-        searchers.append(search_papers)
     if "scopus" in sources:
         searchers.append(search_scopus)
     if "sciencedirect" in sources:
@@ -339,7 +292,7 @@ def run(keywords: list[str], limit: int, year_start: int, year_end: int, email: 
 
         # Cari URL PDF
         pdf_url = direct_url
-        source  = "Semantic Scholar (OA)"
+        source  = "Open Access"
 
         if not pdf_url and doi:
             pdf_url = get_free_pdf_url(doi)
@@ -426,14 +379,14 @@ def run(keywords: list[str], limit: int, year_start: int, year_end: int, email: 
 # ── CLI Entry Point ─────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(
-        description="📚 Bulk download jurnal untuk skripsi",
+        description="📚 Bulk download jurnal untuk skripsi (Scopus + ScienceDirect)",
         formatter_class=argparse.RawTextHelpFormatter,
         epilog="""
 Contoh penggunaan:
-  python journal_dl.py -k "machine learning" "deep learning"
-  python journal_dl.py -k "supply chain" -n 30 -y 2020 2024
-  python journal_dl.py -k "donchian channel breakout" -n 20 --sources scopus sciencedirect --elsevier-key KEY
-  python journal_dl.py -k "ESG firm value" --sources all -e kamu@students.undip.ac.id
+  python journal_dl.py -k "donchian channel breakout" -n 20 --elsevier-key KEY
+  python journal_dl.py -k "supply chain" -n 30 -y 2020 2024 -s scopus --elsevier-key KEY
+  export ELSEVIER_API_KEY=KEY
+  python journal_dl.py -k "ESG firm value" -s all -e kamu@students.undip.ac.id
         """
     )
     parser.add_argument(
@@ -454,13 +407,9 @@ Contoh penggunaan:
     )
 
     parser.add_argument(
-        "--api-key", type=str, default=None,
-        help="Semantic Scholar API key (opsional, hilangkan rate limit)"
-    )
-    parser.add_argument(
-        "-s", "--sources", nargs="+", default=["semanticscholar"],
+        "-s", "--sources", nargs="+", default=["scopus", "sciencedirect"],
         choices=[*VALID_SOURCES, "all"],
-        help="Sumber pencarian (default: semanticscholar). 'all' = ketiga sumber."
+        help="Sumber pencarian (default: scopus sciencedirect). 'all' = kedua sumber."
     )
     parser.add_argument(
         "--elsevier-key", type=str, default=None,
@@ -469,9 +418,6 @@ Contoh penggunaan:
     )
 
     args = parser.parse_args()
-    if args.api_key:
-        global S2_API_KEY
-        S2_API_KEY = args.api_key
     sources = list(VALID_SOURCES) if "all" in args.sources else args.sources
     year_start, year_end = (args.year[0], args.year[1]) if args.year else (None, None)
 
@@ -540,26 +486,23 @@ def interactive():
 
     # ── Sumber ───────────────────────────────────────────────────────────────
     print("\n6️⃣  Cari di sumber mana?")
-    print("   1 = Semua (Semantic Scholar + Scopus + ScienceDirect)")
-    print("   2 = Scopus + ScienceDirect saja (butuh Elsevier API key)")
-    print("   3 = Semantic Scholar saja (gratis, tanpa key)")
+    print("   1 = Scopus + ScienceDirect (disarankan)")
+    print("   2 = Scopus saja")
+    print("   3 = ScienceDirect saja")
     pilihan = tanya("   Pilih", default="1").strip()
     if pilihan == "2":
-        sources = ["scopus", "sciencedirect"]
+        sources = ["scopus"]
     elif pilihan == "3":
-        sources = ["semanticscholar"]
+        sources = ["sciencedirect"]
     else:
-        sources = ["semanticscholar", "scopus", "sciencedirect"]
+        sources = ["scopus", "sciencedirect"]
 
     # ── Elsevier API key ─────────────────────────────────────────────────────
-    elsevier_key = None
-    if any(s in sources for s in ("scopus", "sciencedirect")):
-        print("\n7️⃣  Elsevier API key (gratis, daftar di https://dev.elsevier.com).")
-        print("   Kosongkan untuk lewati — Scopus/ScienceDirect akan di-skip,")
-        print("   yang manual tetap dapat link DOI di CSV.")
-        print("   (Login SSO UNDIP TIDAK perlu di sini — cukup buka link DOI dari")
-        print("    browser di jaringan kampus / VPN UNDIP.)")
-        elsevier_key = input("   Elsevier API key (Enter untuk skip): ").strip() or None
+    print("\n7️⃣  Elsevier API key (wajib, gratis — daftar di https://dev.elsevier.com).")
+    print("   Tanpa key, pencarian tidak bisa jalan.")
+    print("   (Login SSO UNDIP TIDAK perlu di sini — cukup buka link DOI dari")
+    print("    browser di jaringan kampus / VPN UNDIP.)")
+    elsevier_key = input("   Elsevier API key: ").strip() or None
 
     # ── Konfirmasi ───────────────────────────────────────────────────────────
     print("\n" + "─"*45)

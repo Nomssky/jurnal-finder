@@ -2,8 +2,8 @@
 
 Dua script Python untuk mempercepat penyusunan skripsi:
 
-1. **`journal_dl.py`** — cari paper via Semantic Scholar, **Scopus**,
-   **ScienceDirect**, cek PDF gratis via Unpaywall, download massal,
+1. **`journal_dl.py`** — cari paper via **Scopus** + **ScienceDirect**
+   (Elsevier API), cek PDF gratis via Unpaywall, download massal,
    export `hasil_pencarian.csv` + `manual_download.csv` (berisi link DOI).
 2. **`abstract_to_excel.py`** — baca PDF di folder download, extract via
    OpenRouter (DeepSeek free), hasilkan `tabel_perbandingan.xlsx`
@@ -32,14 +32,12 @@ python journal_dl.py
 Mode CLI:
 
 ```bash
-python journal_dl.py -k "ESG firm value" "Tobin Q" -n 20 -y 2018 2024 -e kamu@email.com
-# Dengan API key Semantic Scholar (gratis, hilangkan rate-limit 429):
-python journal_dl.py -k "ESG" -n 30 --api-key S2_KEY_KAMU
-# Scopus + ScienceDirect (butuh Elsevier API key):
-python journal_dl.py -k "donchian channel breakout" -n 20 -y 2000 2024 \
-  --sources scopus sciencedirect --elsevier-key KEY_KAMU -e kamu@students.undip.ac.id
-# Semua sumber sekaligus:
-python journal_dl.py -k "donchian channel" --sources all --elsevier-key KEY_KAMU
+python journal_dl.py -k "donchian channel breakout" -n 20 -y 2000 2024 --elsevier-key KEY_KAMU -e kamu@students.undip.ac.id
+# Atau via env (tidak perlu --elsevier-key lagi):
+export ELSEVIER_API_KEY=KEY_KAMU
+python journal_dl.py -k "donchian channel" -n 20 --sources all
+# Hanya Scopus:
+python journal_dl.py -k "ESG firm value" -n 30 -s scopus
 ```
 
 ## Scopus & ScienceDirect + akses UNDIP
@@ -71,7 +69,7 @@ python abstract_to_excel.py --dir ./jurnal_download --out hasil.xlsx --api-key s
 
 ## Catatan API
 
-- Semantic Scholar tanpa API key kena rate-limit `429` (IP bersama).
-  Daftar gratis: https://www.semanticscholar.org/product/api
+- Elsevier (Scopus + ScienceDirect) **wajib** API key.
+  Daftar gratis: https://dev.elsevier.com
 - Unpaywall butuh email valid di `-e`.
 - OpenRouter: https://openrouter.ai/
