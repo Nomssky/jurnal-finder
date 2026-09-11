@@ -120,7 +120,13 @@ def _search_elsevier(api_url: str, origin: str, query: str, keyword: str,
     try:
         resp = requests.get(api_url, params=params, headers=_elsevier_headers(), timeout=20)
         if resp.status_code in (401, 403):
-            err(f"{origin}: API key ditolak (401/403). Cek key di https://dev.elsevier.com")
+            err(f"{origin}: API key ditolak (401/403).")
+            if origin == "sciencedirect":
+                err("  Cek di dev.elsevier.com → My API Key: pastikan produk ScienceDirect")
+                err("  Search aktif untuk key ini. Catatan: Scopus sudah mengindeks hampir")
+                err("  semua artikel ScienceDirect, jadi pencarian via Scopus saja umumnya cukup.")
+            else:
+                err("  Cek key di https://dev.elsevier.com")
             return []
         if resp.status_code == 429:
             warn(f"{origin}: rate limited (429). Kecilkan -n atau coba lagi nanti.")

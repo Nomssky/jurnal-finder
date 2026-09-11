@@ -40,6 +40,33 @@ python journal_dl.py -k "donchian channel" -n 20 --sources all
 python journal_dl.py -k "ESG firm value" -n 30 -s scopus
 ```
 
+## Download massal bermodal akun univ (`univ_dl.py`)
+
+`journal_dl.py` hanya *mencari*. Untuk *mengunduh* PDF paywall bermodal akun
+UNDIP, pakai `univ_dl.py` — login SSO manual **sekali** di browser sungguhan,
+script memakai ulang sesi itu untuk download massal. Password tidak pernah
+disimpan di mana pun, yang disimpan hanya cookie sesi (`.session_*.json`,
+sudah di-`.gitignore`).
+
+```bash
+pip install -r requirements.txt
+python -m playwright install chromium   # sekali saja
+
+# 1. Login manual sekali (browser terbuka → login SSO UNDIP sendiri → ENTER)
+python univ_dl.py login
+
+# 2. Download semua DOI dari hasil pencarian sebelumnya
+python univ_dl.py download -f jurnal_download/manual_download.csv
+
+# 3. Atau DOI langsung
+python univ_dl.py download --doi 10.1016/j.jbankfin.2019.01.001
+```
+
+Catatan: sesi bisa kedaluwarsa (biasanya hitungan jam/hari) — kalau script
+bilang sesi habis, jalankan `login` ulang. Yang bukan artikel ScienceDirect
+atau tidak dilanggan institusi akan dilaporkan `skip`/`failed` di
+`hasil_download_univ.csv`.
+
 ## Scopus & ScienceDirect + akses UNDIP
 
 **Daftar API key Elsevier (gratis):** https://dev.elsevier.com → Create API Key,

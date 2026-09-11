@@ -5,6 +5,10 @@ __pycache__/
 venv/
 .env
 
+# Sesi login institusi — RAHASIA, jangan pernah di-commit!
+.session_*.json
+*storage_state*.json
+
 # Hasil download (jangan push PDF/Excel/CSV ke repo)
 jurnal_download/
 jurnal_download1/
