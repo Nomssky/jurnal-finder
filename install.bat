@@ -28,26 +28,25 @@ python -m venv .venv
 set "BIN_DIR=%USERPROFILE%\.local\bin"
 if not exist "%BIN_DIR%" mkdir "%BIN_DIR%"
 
-(
+> "%BIN_DIR%\jf.cmd" (
     echo @echo off
     echo setlocal
-    echo set "INSTALL_DIR=%INSTALL_DIR%"
+    echo set "INSTALL_DIR=%%USERPROFILE%%\.jf"
     echo.
     echo :: Auto-update
-    echo if exist "%INSTALL_DIR%\.git" ^(
+    echo if exist "%%INSTALL_DIR%%\.git" ^(
     echo     cd /d "%%INSTALL_DIR%%"
-    echo     set "CURRENT=%%~1"
-    echo     for /f "delims=" %%%%i in ^('git rev-parse HEAD'^) do set "CURRENT=%%%%i"
+    echo     for /f "tokens=*" %%%%i in ^('git rev-parse HEAD'^) do set "CURRENT=%%%%i"
     echo     git pull --quiet 2^>nul
-    echo     for /f "delims=" %%%%i in ^('git rev-parse HEAD'^) do set "NEW=%%%%i"
+    echo     for /f "tokens=*" %%%%i in ^('git rev-parse HEAD'^) do set "NEW=%%%%i"
     echo     if not "%%CURRENT%%"=="%%NEW%%" ^(
     echo         echo Update ditemukan! Installing...
-    echo         "%INSTALL_DIR%\.venv\Scripts\pip.exe" install -q .
+    echo         "%%INSTALL_DIR%%\.venv\Scripts\pip.exe" install -q .
     echo     ^)
     echo ^)
     echo.
-    echo "%INSTALL_DIR%\.venv\Scripts\python.exe" -m jurnal_finder %%*
-) > "%BIN_DIR%\jf.cmd"
+    echo "%%INSTALL_DIR%%\.venv\Scripts\python.exe" -m jurnal_finder %%*
+)
 
 :: Tambah PATH
 echo Menambah %BIN_DIR% ke PATH...
