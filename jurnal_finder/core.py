@@ -586,36 +586,115 @@ def fallback_entry(filename: str) -> dict:
             "variabel_x": "-", "variabel_y": "-", "variabel_kontrol": "-",
             "metode": "-", "hasil": "-", "teori": "-", "sampel": "-"}
 
+def parse_offline(text: str, filename: str) -> dict:
+    """Ekstrak metadata dari PDF text tanpa AI (100% offline)."""
+    import re
+    entry = fallback_entry(filename)
+    if not text:
+        return entry
+
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+
+    # ── Judul: biasanya baris pertama/kedua yang agak panjang ──
+    for line in lines[:5]:
+        if len(line) > 15 and not line.startswith(("Abstract", "BACKGROUND", "Keywords")):
+            entry["judul"] = line[:120]
+            break
+
+    # ── Tahun: cari 4 digit angka 19xx/20xx ──
+    years = re.findall(r"\b(19\d{2}|20\d{2})\b", text[:3000])
+    if years:
+        entry["tahun"] = years[0]
+
+    # ── Penulis: baris setelah judul, sebelum Abstract ──
+    for i, line in enumerate(lines[:10]):
+        if any(kw in line.lower() for kw in ["abstract", "background", "keywords"]):
+            # Penulis ada di baris sebelum abstract
+            for j in range(max(0, i-3), i):
+                candidate = lines[j]
+                # Ciri nama: ada koma, atau huruf kapital, atau ada afiliasi
+                if ("," in candidate or "Department" in candidate or
+                    "University" in candidate or "Institute" in candidate):
+                    entry["penulis"] = candidate[:80]
+                    break
+            break
+
+    # ── Jurnal: dari filename atau text ──
+    # Filename: [2019] Journal Name.pdf
+    m = re.match(r"\[\d{4}\]\s*(.+?)\.pdf", filename)
+    if m:
+        entry["jurnal"] = m.group(1).strip()
+    else:
+        # Cari di text: biasanya ada setelah tahun
+        for line in lines[:15]:
+            if any(kw in line for kw in ["Journal", "Review", "Proceedings", "Letters"]):
+                entry["jurnal"] = line[:60]
+                break
+
+    # ── Metode: cari kata kunci ──
+    text_lower = text.lower()
+    metode_map = {
+        "regression": "Regression Analysis",
+        "logistic regression": "Logistic Regression",
+        "linear regression": "Linear Regression",
+        "anova": "ANOVA",
+        "meta-analysis": "Meta-Analysis",
+        "systematic review": "Systematic Review",
+        "qualitative": "Qualitative",
+        "quantitative": "Quantitative",
+        "survey": "Survey",
+        "questionnaire": "Questionnaire",
+        "experiment": "Experiment",
+        "simulation": "Simulation",
+        "machine learning": "Machine Learning",
+        "deep learning": "Deep Learning",
+        "neural network": "Neural Network",
+        "random forest": "Random Forest",
+        "svm": "SVM",
+        "clustering": "Clustering",
+        "pca": "PCA",
+        "t-test": "T-Test",
+        "chi-square": "Chi-Square",
+    }
+    metode_found = []
+    for key, val in metode_map.items():
+        if key in text_lower:
+            metode_found.append(val)
+    if metode_found:
+        entry["metode"] = ", ".join(metode_found[:3])
+
+    # ── Sampel: cari angka + kata kunci ──
+    sample_patterns = [
+        r"(\d[\d,.]*)\s*(?:participants|subjects|respondents|samples|patients)",
+        r"sample\s*(?:of|size|n)\s*[:=]?\s*(\d[\d,.]*)",
+        r"(?:n|N)\s*=\s*(\d[\d,.]*)",
+    ]
+    for pat in sample_patterns:
+        m = re.search(pat, text, re.I)
+        if m:
+            entry["sampel"] = m.group(1).strip()
+            break
+
+    # ── Teori/Model: cari nama teori ──
+    teori_keywords = [
+        "theory of", "theories of", "model of", "framework of",
+        "stakeholder theory", "agency theory", "signaling theory",
+        "modern portfolio", "efficient market", "behavioral finance",
+        "capital asset pricing", "apt", "fama", "black-scholes",
+    ]
+    for kw in teori_keywords:
+        if kw in text_lower:
+            # Ambil konteks sekitar
+            idx = text_lower.index(kw)
+            snippet = text[max(0,idx-20):idx+60].strip()
+            entry["teori"] = snippet[:80]
+            break
+
+    return entry
+
 def parse_with_ai(text: str, filename: str) -> dict:
-    import json as _json
-    if not OPENROUTER_KEY:
-        return fallback_entry(filename)
-    prompt = f"""Kamu research assistant. Teks jurnal (hal 1-3):
-
-FILENAME: {filename}
----
-{text}
----
-
-Extract JSON (tidak ditemukan = "-"). Istilah teknis boleh Inggris, penjelasan Indonesia:
-{{"judul": "...", "penulis": "maks 3 nama", "tahun": "angka saja",
-"jurnal": "...", "variabel_x": "...", "variabel_y": "...",
-"variabel_kontrol": "...", "metode": "...", "hasil": "...",
-"teori": "...", "sampel": "..."}}
-Balas HANYA JSON valid."""
-    try:
-        resp = requests.post(
-            OPENROUTER_API, timeout=60,
-            headers={"Authorization": f"Bearer {OPENROUTER_KEY}",
-                     "Content-Type": "application/json"},
-            json={"model": OPENROUTER_MODEL, "max_tokens": 1000, "temperature": 0.1,
-                  "messages": [{"role": "user", "content": prompt}]})
-        resp.raise_for_status()
-        raw = resp.json()["choices"][0]["message"]["content"].strip()
-        return _json.loads(raw.replace("```json", "").replace("```", "").strip())
-    except Exception as e:
-        warn(f"AI gagal untuk {filename[:40]} ({e}) → baris metadata saja.")
-        return fallback_entry(filename)
+    """Wrapper: pakai offline parser (AI sudah dihapus)."""
+    return parse_offline(text, filename)
 
 def build_excel(entries: list, output_path: Path, ai_mode: bool):
     from openpyxl import Workbook
@@ -689,14 +768,10 @@ def build_excel(entries: list, output_path: Path, ai_mode: bool):
     wb.save(str(output_path))
 
 def run_extract(outdir: Path, ai_key: str | None):
-    global OPENROUTER_KEY
-    if ai_key:
-        OPENROUTER_KEY = ai_key
     pdfs = sorted(outdir.glob("*.pdf"))
     if not pdfs:
         err(f"Tidak ada PDF di {outdir} — tidak ada yang bisa diekstrak.")
         return
-    ai_mode = bool(OPENROUTER_KEY)
 
     # Load progress untuk resume
     progress_file = outdir / "_extract_progress.json"
@@ -708,11 +783,7 @@ def run_extract(outdir: Path, ai_key: str | None):
         except Exception:
             done_entries = {}
 
-    if ai_mode:
-        info(f"Mode AI aktif — mengekstrak {len(pdfs)} PDF...")
-    else:
-        warn("Tanpa OpenRouter key → Excel berisi metadata (judul/penulis/tahun/jurnal).")
-        warn("Isi key untuk analisis AI (X/Y/metode/hasil).")
+    info(f"Mengekstrak {len(pdfs)} PDF (offline, tanpa API key)...")
     entries = []
     csv_rows = {}
     csv_path = outdir / "hasil_pencarian.csv"
@@ -727,17 +798,17 @@ def run_extract(outdir: Path, ai_key: str | None):
             entries.append(done_entries[pdf_key])
             continue
         print(f"[{i}/{len(pdfs)}] {pdf.name[:60]}...")
-        if ai_mode:
-            text = extract_pdf_text(pdf)
-            entry = parse_with_ai(text, pdf.name) if text else fallback_entry(pdf.name)
-            time.sleep(1)
-        else:
-            meta = csv_rows.get(pdf.name[7:57] if pdf.name.startswith("[") else pdf.name[:50], {})
-            entry = fallback_entry(pdf.name)
-            entry.update({"judul": pdf.name,
-                          "penulis": meta.get("Authors", "-") or "-",
-                          "tahun": str(meta.get("Year", "-") or "-"),
-                          "jurnal": meta.get("Journal", "-") or "-"})
+        text = extract_pdf_text(pdf)
+        entry = parse_offline(text, pdf.name)
+        # Merge data dari CSV jika ada
+        meta = csv_rows.get(pdf.name[7:57] if pdf.name.startswith("[") else pdf.name[:50], {})
+        if meta:
+            if entry["penulis"] == "-":
+                entry["penulis"] = meta.get("Authors", "-") or "-"
+            if entry["tahun"] == "-":
+                entry["tahun"] = str(meta.get("Year", "-") or "-")
+            if entry["jurnal"] == "-":
+                entry["jurnal"] = meta.get("Journal", "-") or "-"
         entries.append(entry)
         done_entries[pdf_key] = entry
         # Simpan progress setiap 5 file
@@ -748,7 +819,7 @@ def run_extract(outdir: Path, ai_key: str | None):
     # Simpan progress final
     progress_file.write_text(json.dumps(done_entries, ensure_ascii=False, indent=2), encoding="utf-8")
     out_xlsx = outdir / "tabel_perbandingan.xlsx"
-    build_excel(entries, out_xlsx, ai_mode)
+    build_excel(entries, out_xlsx, False)
     ok(f"Excel tersimpan: {out_xlsx}")
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -817,14 +888,12 @@ def menu_cari():
 
     # Tawarkan ekstrak
     print("\nEkstrak ke Excel?")
-    print("  - Dengan AI key: X/Y/metode/hasil/teori terisi AI")
-    print("  - Tanpa key: metadata saja (judul/penulis/tahun)")
+    print("  - 100% offline, tanpa API key")
     print("  - Resume: PDF sudah diproses akan di-skip")
     if input("  Ekstrak sekarang? (y/n) [y]: ").strip().lower() != "n":
-        ai_key = input("  OpenRouter key (Enter = tanpa AI): ").strip() or None
-        run_extract(outdir, ai_key)
+        run_extract(outdir, None)
 
-    bold("\n✅ Selesai! Cek folder ./jurnal_download/\n")
+    bold("\n✅ Selesai! Cek folder ~/jurnal_download/\n")
 
 def menu_ekstrak():
     """Menu: Ekstrak PDF yang sudah ada."""
@@ -839,19 +908,11 @@ def menu_ekstrak():
         return
 
     print(f"Ditemukan {len(pdfs)} PDF di {DOWNLOAD_DIR}/\n")
-    print("Mode ekstrak:")
-    print("  1. Metadata saja (gratis, cepat)")
-    print("  2. Analisis AI (perlu OpenRouter key)")
-    mode = input("Pilih [1]: ").strip() or "1"
+    print("Mode: 100% offline, tanpa API key, tidak perlu internet.")
+    print("Resume: PDF yang sudah diekstrak akan di-skip.\n")
+    input("Tekan Enter untuk mulai ekstrak...")
 
-    ai_key = None
-    if mode == "2":
-        ai_key = input("OpenRouter key: ").strip() or None
-        if not ai_key:
-            warn("Tidak ada key → mode metadata saja.")
-            mode = "1"
-
-    run_extract(DOWNLOAD_DIR, ai_key)
+    run_extract(DOWNLOAD_DIR, None)
     bold("\n✅ Selesai!\n")
 
 def menu_folder():
@@ -922,7 +983,6 @@ Contoh:
     parser.add_argument("--tahun", nargs=2, type=int, metavar=("DARI", "SAMPAI"), default=None)
     parser.add_argument("--no-extract", action="store_true")
     parser.add_argument("--extract-only", action="store_true", help="Hanya ekstrak PDF yang sudah ada (tidak download ulang)")
-    parser.add_argument("--ai-key", default=None, help="OpenRouter key untuk ekstrak AI")
     args = parser.parse_args()
 
     # Mode extract-only: ekstrak PDF yang sudah ada
@@ -931,7 +991,7 @@ Contoh:
         if not outdir.exists() or not list(outdir.glob("*.pdf")):
             err(f"Tidak ada PDF di {outdir}")
             return
-        run_extract(outdir, args.ai_key)
+        run_extract(outdir, None)
         return
 
     if not args.topik and not args.keyword_en:
@@ -946,7 +1006,7 @@ Contoh:
     ys, ye = (args.tahun[0], args.tahun[1]) if args.tahun else (None, None)
     outdir = run_search_download(queries, args.limit, ys, ye, DOWNLOAD_DIR)
     if not args.no_extract:
-        run_extract(outdir, args.ai_key)
+        run_extract(outdir, None)
 
 if __name__ == "__main__":
     main()
