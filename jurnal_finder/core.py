@@ -764,24 +764,20 @@ def tanya(pesan: str, default=None) -> str:
             return jwb
         print("  ⚠ Tidak boleh kosong, coba lagi.")
 
-def interactive():
-    bold("\n╔══════════════════════════════════════════╗")
-    bold("║   📚 Jurnal Finder — Skripsi             ║")
-    bold("║   Cari → Download → Analisis             ║")
-    bold("╚══════════════════════════════════════════╝\n")
-    print("Ceritakan jurnal seperti apa yang kamu mau. Boleh Bahasa Indonesia.\n")
+def menu_cari():
+    """Menu: Cari & Download Jurnal."""
+    bold("\n┌─────────────────────────────────────┐")
+    bold("│  🔍 Cari & Download Jurnal          │")
+    bold("└─────────────────────────────────────┘\n")
 
-    print("1️⃣  Topik / judul penelitian kamu?")
-    print("   Contoh: 'pengaruh inflasi terhadap harga saham'")
-    topik = tanya("   Topik")
-    print("\n2️⃣  Variabel X (bebas/independen)? Kosongkan kalau tidak ada.")
-    print("   Contoh: 'inflasi, suku bunga' / 'ESG disclosure'")
-    var_x = input("   Variabel X (Enter untuk skip): ").strip()
-    print("\n3️⃣  Variabel Y (terikat/dependen)? Kosongkan kalau tidak ada.")
-    print("   Contoh: 'harga saham' / 'nilai perusahaan'")
-    var_y = input("   Variabel Y (Enter untuk skip): ").strip()
+    print("Ceritakan jurnal seperti apa yang kamu mau.")
+    print("Boleh Bahasa Indonesia — otomatis diterjemahkan.\n")
 
-    print("\n🌐 Menerjemahkan ke Inggris (gratis)...")
+    topik = tanya("Topik / judul penelitian")
+    var_x = input("Variabel X (Enter untuk skip): ").strip()
+    var_y = input("Variabel Y (Enter untuk skip): ").strip()
+
+    print("\n🌐 Menerjemahkan ke Inggris...")
     topik_en, m1 = translate_id_en(topik)
     x_en, m2 = translate_id_en(var_x) if var_x else ("", "asli")
     y_en, m3 = translate_id_en(var_y) if var_y else ("", "asli")
@@ -790,19 +786,21 @@ def interactive():
         info(f"X: '{var_x}' → '{x_en}' ({m2})")
     if var_y:
         info(f"Y: '{var_y}' → '{y_en}' ({m3})")
+
     queries = [q for q in [topik_en, f"{x_en} {y_en}".strip()] if q]
-    queries = list(dict.fromkeys(queries))  # dedup, jaga urutan
-    print(f"\n4️⃣  Keyword pencarian: {', '.join(queries)}")
-    ubah = input("   Ubah? (Enter = lanjut, atau ketik keyword Inggris pisah koma): ").strip()
+    queries = list(dict.fromkeys(queries))
+    print(f"\nKeyword pencarian: {', '.join(queries)}")
+    ubah = input("Ubah? (Enter = lanjut, atau ketik keyword pisah koma): ").strip()
     if ubah:
         queries = [k.strip() for k in ubah.split(",") if k.strip()] or queries
 
-    print("\n5️⃣  Filter tahun? Rekomendasi 5-10 tahun terakhir.")
+    print("\nFilter tahun?")
     pakai = input("   Filter tahun? (y/n) [y]: ").strip().lower()
     ys, ye = None, None
     if pakai != "n":
-        ys, ye = int(tanya("   Dari tahun", default=2018)), int(tanya("   Sampai tahun", default=2024))
-    limit = int(tanya("\n6️⃣  Cari berapa jurnal per keyword", default=10))
+        ys = int(tanya("   Dari tahun", default=2018))
+        ye = int(tanya("   Sampai tahun", default=2024))
+    limit = int(tanya("Jurnal per keyword", default=10))
 
     print("\n" + "─" * 45)
     bold("  Ringkasan:")
@@ -812,19 +810,98 @@ def interactive():
     print(f"  📄 Jumlah  : {limit} per keyword")
     print("─" * 45)
     if input("\nMulai cari + download? (y/n) [y]: ").strip().lower() == "n":
-        print("Oke, dibatalin.")
         return
+
     print()
     outdir = run_search_download(queries, limit, ys, ye, DOWNLOAD_DIR)
 
-    print("\n9️⃣  Ekstrak semua jurnal jadi tabel Excel analisis?")
-    print("   - Dengan OpenRouter key (gratis): kolom X/Y/metode/hasil/teori terisi AI")
-    print("   - Tanpa key: Excel metadata saja (judul/penulis/tahun/jurnal)")
-    print("   - Resume: jika sudah pernah ekstrak, PDF yang sudah diproses akan di-skip")
-    if input("   Ekstrak sekarang? (y/n) [y]: ").strip().lower() != "n":
-        ai_key = input("   OpenRouter key (Enter = tanpa AI): ").strip() or None
+    # Tawarkan ekstrak
+    print("\nEkstrak ke Excel?")
+    print("  - Dengan AI key: X/Y/metode/hasil/teori terisi AI")
+    print("  - Tanpa key: metadata saja (judul/penulis/tahun)")
+    print("  - Resume: PDF sudah diproses akan di-skip")
+    if input("  Ekstrak sekarang? (y/n) [y]: ").strip().lower() != "n":
+        ai_key = input("  OpenRouter key (Enter = tanpa AI): ").strip() or None
         run_extract(outdir, ai_key)
-    bold("\n🎉 Beres! Cek folder ./jurnal_download/\n")
+
+    bold("\n✅ Selesai! Cek folder ./jurnal_download/\n")
+
+def menu_ekstrak():
+    """Menu: Ekstrak PDF yang sudah ada."""
+    bold("\n┌─────────────────────────────────────┐")
+    bold("│  📊 Ekstrak PDF → Excel             │")
+    bold("└─────────────────────────────────────┘\n")
+
+    pdfs = sorted(DOWNLOAD_DIR.glob("*.pdf")) if DOWNLOAD_DIR.exists() else []
+    if not pdfs:
+        err(f"Tidak ada PDF di {DOWNLOAD_DIR}")
+        print("  Jalankan 'Cari & Download' terlebih dahulu.")
+        return
+
+    print(f"Ditemukan {len(pdfs)} PDF di {DOWNLOAD_DIR}/\n")
+    print("Mode ekstrak:")
+    print("  1. Metadata saja (gratis, cepat)")
+    print("  2. Analisis AI (perlu OpenRouter key)")
+    mode = input("Pilih [1]: ").strip() or "1"
+
+    ai_key = None
+    if mode == "2":
+        ai_key = input("OpenRouter key: ").strip() or None
+        if not ai_key:
+            warn("Tidak ada key → mode metadata saja.")
+            mode = "1"
+
+    run_extract(DOWNLOAD_DIR, ai_key)
+    bold("\n✅ Selesai!\n")
+
+def menu_folder():
+    """Menu: Ganti folder output."""
+    global DOWNLOAD_DIR, EXTRACT_DIR
+    bold("\n┌─────────────────────────────────────┐")
+    bold("│  📁 Folder Output                   │")
+    bold("└─────────────────────────────────────┘\n")
+
+    print(f"Folder saat ini: {DOWNLOAD_DIR.resolve()}")
+    new_dir = input("Folder baru (Enter = tetap sama): ").strip()
+    if new_dir:
+        DOWNLOAD_DIR = Path(new_dir)
+        DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        ok(f"Folder diubah ke: {DOWNLOAD_DIR.resolve()}")
+
+def interactive():
+    global DOWNLOAD_DIR
+    while True:
+        bold("\n╔══════════════════════════════════════════╗")
+        bold("║   📚 Jurnal Finder                      ║")
+        bold("║   Cari → Download → Analisis            ║")
+        bold("╚══════════════════════════════════════════╝\n")
+
+        if DOWNLOAD_DIR.exists():
+            pdf_count = len(list(DOWNLOAD_DIR.glob("*.pdf")))
+            if pdf_count > 0:
+                print(f"  📂 Folder: {DOWNLOAD_DIR.resolve()}")
+                print(f"  📄 PDF tersedia: {pdf_count}")
+                print()
+
+        print("  1  🔍  Cari & Download Jurnal")
+        print("  2  📊  Ekstrak PDF → Excel")
+        print("  3  📁  Ganti Folder Output")
+        print("  4  ❌  Keluar")
+        print()
+
+        pilihan = input("Pilih [1-4]: ").strip()
+
+        if pilihan == "1":
+            menu_cari()
+        elif pilihan == "2":
+            menu_ekstrak()
+        elif pilihan == "3":
+            menu_folder()
+        elif pilihan == "4":
+            bold("\n👋 Sampai jumpa!\n")
+            break
+        else:
+            warn("Pilihan tidak valid.")
 
 def main():
     parser = argparse.ArgumentParser(
