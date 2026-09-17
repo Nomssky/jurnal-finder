@@ -42,7 +42,7 @@ CROSSREF_API   = "https://api.crossref.org/works"
 
 DOWNLOAD_DIR = Path("./jurnal_download")
 
-OPENROUTER_MODEL = "openai/gpt-oss-120b:free"
+OPENROUTER_MODEL = "google/gemma-4-31b-it:free"
 OPENROUTER_KEY   = os.getenv("OPENROUTER_API_KEY", "")
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
@@ -697,6 +697,17 @@ def run_extract(outdir: Path, ai_key: str | None):
         err(f"Tidak ada PDF di {outdir} — tidak ada yang bisa diekstrak.")
         return
     ai_mode = bool(OPENROUTER_KEY)
+
+    # Load progress untuk resume
+    progress_file = outdir / "_extract_progress.json"
+    done_entries = {}
+    if progress_file.exists():
+        try:
+            done_entries = json.loads(progress_file.read_text(encoding="utf-8"))
+            info(f"Resume: {len(done_entries)} PDF sudah diekstrak sebelumnya")
+        except Exception:
+            done_entries = {}
+
     if ai_mode:
         info(f"Mode AI aktif — mengekstrak {len(pdfs)} PDF...")
     else:
@@ -710,6 +721,11 @@ def run_extract(outdir: Path, ai_key: str | None):
             for r in csv.DictReader(f):
                 csv_rows[r.get("Title", "")[:50]] = r
     for i, pdf in enumerate(pdfs, 1):
+        pdf_key = pdf.name
+        # Skip jika sudah diekstrak
+        if pdf_key in done_entries:
+            entries.append(done_entries[pdf_key])
+            continue
         print(f"[{i}/{len(pdfs)}] {pdf.name[:60]}...")
         if ai_mode:
             text = extract_pdf_text(pdf)
@@ -723,7 +739,14 @@ def run_extract(outdir: Path, ai_key: str | None):
                           "tahun": str(meta.get("Year", "-") or "-"),
                           "jurnal": meta.get("Journal", "-") or "-"})
         entries.append(entry)
+        done_entries[pdf_key] = entry
+        # Simpan progress setiap 5 file
+        if i % 5 == 0:
+            progress_file.write_text(json.dumps(done_entries, ensure_ascii=False, indent=2), encoding="utf-8")
         ok("ok")
+
+    # Simpan progress final
+    progress_file.write_text(json.dumps(done_entries, ensure_ascii=False, indent=2), encoding="utf-8")
     out_xlsx = outdir / "tabel_perbandingan.xlsx"
     build_excel(entries, out_xlsx, ai_mode)
     ok(f"Excel tersimpan: {out_xlsx}")
@@ -797,6 +820,7 @@ def interactive():
     print("\n9️⃣  Ekstrak semua jurnal jadi tabel Excel analisis?")
     print("   - Dengan OpenRouter key (gratis): kolom X/Y/metode/hasil/teori terisi AI")
     print("   - Tanpa key: Excel metadata saja (judul/penulis/tahun/jurnal)")
+    print("   - Resume: jika sudah pernah ekstrak, PDF yang sudah diproses akan di-skip")
     if input("   Ekstrak sekarang? (y/n) [y]: ").strip().lower() != "n":
         ai_key = input("   OpenRouter key (Enter = tanpa AI): ").strip() or None
         run_extract(outdir, ai_key)
@@ -810,7 +834,8 @@ def main():
 Contoh:
   python jurnal_finder.py
   python jurnal_finder.py --topik "pengaruh inflasi terhadap harga saham" -n 10
-  python jurnal_finder.py --keyword-en "inflation stock prices" --skip-login --no-extract
+  python jurnal_finder.py --keyword-en "inflation stock prices" --no-extract
+  python jurnal_finder.py --extract-only --ai-key YOUR_KEY   # ekstrak ulang
         """)
     parser.add_argument("--topik", default=None, help="Topik (boleh Indonesia, auto-translate)")
     parser.add_argument("--x", default="", help="Variabel X")
@@ -819,8 +844,18 @@ Contoh:
     parser.add_argument("-n", "--limit", type=int, default=10)
     parser.add_argument("--tahun", nargs=2, type=int, metavar=("DARI", "SAMPAI"), default=None)
     parser.add_argument("--no-extract", action="store_true")
+    parser.add_argument("--extract-only", action="store_true", help="Hanya ekstrak PDF yang sudah ada (tidak download ulang)")
     parser.add_argument("--ai-key", default=None, help="OpenRouter key untuk ekstrak AI")
     args = parser.parse_args()
+
+    # Mode extract-only: ekstrak PDF yang sudah ada
+    if args.extract_only:
+        outdir = DOWNLOAD_DIR
+        if not outdir.exists() or not list(outdir.glob("*.pdf")):
+            err(f"Tidak ada PDF di {outdir}")
+            return
+        run_extract(outdir, args.ai_key)
+        return
 
     if not args.topik and not args.keyword_en:
         interactive()
