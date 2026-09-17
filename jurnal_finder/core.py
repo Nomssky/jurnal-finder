@@ -586,88 +586,123 @@ def fallback_entry(filename: str) -> dict:
             "variabel_x": "-", "variabel_y": "-", "variabel_kontrol": "-",
             "metode": "-", "hasil": "-", "teori": "-", "sampel": "-"}
 
-def parse_offline(text: str, filename: str) -> dict:
-    """Ekstrak metadata dari PDF text tanpa AI (100% offline)."""
+def parse_offline(text: str, filename: str, csv_meta: dict = None) -> dict:
+    """Ekstrak metadata dari PDF text + CSV data (100% offline)."""
     import re
     entry = fallback_entry(filename)
+
+    # ── Prioritas: pakai CSV data (lebih akurat) ──
+    if csv_meta:
+        if csv_meta.get("Title"):
+            entry["judul"] = csv_meta["Title"][:120]
+        if csv_meta.get("Authors"):
+            entry["penulis"] = csv_meta["Authors"][:80]
+        if csv_meta.get("Year"):
+            entry["tahun"] = str(csv_meta["Year"])
+        if csv_meta.get("Journal"):
+            entry["jurnal"] = csv_meta["Journal"][:60]
+        if csv_meta.get("DOI"):
+            entry["doi"] = csv_meta["DOI"]
+
+    # ── Ekstrak dari PDF text ──
     if not text:
         return entry
 
     lines = [l.strip() for l in text.split("\n") if l.strip()]
+    text_lower = text.lower()
 
-    # ── Judul: biasanya baris pertama/kedua yang agak panjang ──
-    for line in lines[:5]:
-        if len(line) > 15 and not line.startswith(("Abstract", "BACKGROUND", "Keywords")):
-            entry["judul"] = line[:120]
-            break
-
-    # ── Tahun: cari 4 digit angka 19xx/20xx ──
-    years = re.findall(r"\b(19\d{2}|20\d{2})\b", text[:3000])
-    if years:
-        entry["tahun"] = years[0]
-
-    # ── Penulis: baris setelah judul, sebelum Abstract ──
-    for i, line in enumerate(lines[:10]):
-        if any(kw in line.lower() for kw in ["abstract", "background", "keywords"]):
-            # Penulis ada di baris sebelum abstract
-            for j in range(max(0, i-3), i):
-                candidate = lines[j]
-                # Ciri nama: ada koma, atau huruf kapital, atau ada afiliasi
-                if ("," in candidate or "Department" in candidate or
-                    "University" in candidate or "Institute" in candidate):
-                    entry["penulis"] = candidate[:80]
-                    break
-            break
-
-    # ── Jurnal: dari filename atau text ──
-    # Filename: [2019] Journal Name.pdf
-    m = re.match(r"\[\d{4}\]\s*(.+?)\.pdf", filename)
-    if m:
-        entry["jurnal"] = m.group(1).strip()
-    else:
-        # Cari di text: biasanya ada setelah tahun
-        for line in lines[:15]:
-            if any(kw in line for kw in ["Journal", "Review", "Proceedings", "Letters"]):
-                entry["jurnal"] = line[:60]
+    # ── Judul: perbaiki dari CSV jika terlalu pendek ──
+    if len(entry["judul"]) < 20 or entry["judul"] == filename:
+        for line in lines[:5]:
+            if len(line) > 15 and not line.startswith(("Abstract", "BACKGROUND", "Keywords")):
+                entry["judul"] = line[:120]
                 break
 
-    # ── Metode: cari kata kunci ──
-    text_lower = text.lower()
-    metode_map = {
-        "regression": "Regression Analysis",
-        "logistic regression": "Logistic Regression",
-        "linear regression": "Linear Regression",
-        "anova": "ANOVA",
-        "meta-analysis": "Meta-Analysis",
-        "systematic review": "Systematic Review",
-        "qualitative": "Qualitative",
-        "quantitative": "Quantitative",
-        "survey": "Survey",
-        "questionnaire": "Questionnaire",
-        "experiment": "Experiment",
-        "simulation": "Simulation",
-        "machine learning": "Machine Learning",
-        "deep learning": "Deep Learning",
-        "neural network": "Neural Network",
-        "random forest": "Random Forest",
-        "svm": "SVM",
-        "clustering": "Clustering",
-        "pca": "PCA",
-        "t-test": "T-Test",
-        "chi-square": "Chi-Square",
-    }
+    # ── Tahun: dari CSV atau regex ──
+    if entry["tahun"] == "-":
+        years = re.findall(r"\b(19\d{2}|20\d{2})\b", text[:3000])
+        if years:
+            entry["tahun"] = years[0]
+
+    # ── Penulis: dari CSV atau regex ──
+    if entry["penulis"] == "-":
+        for i, line in enumerate(lines[:10]):
+            if any(kw in line.lower() for kw in ["abstract", "background", "keywords"]):
+                for j in range(max(0, i-3), i):
+                    candidate = lines[j]
+                    if ("," in candidate or "Department" in candidate or
+                        "University" in candidate or "Institute" in candidate):
+                        entry["penulis"] = candidate[:80]
+                        break
+                break
+
+    # ── Jurnal: dari CSV atau filename ──
+    if entry["jurnal"] == "-":
+        m = re.match(r"\[\d{4}\]\s*(.+?)\.pdf", filename)
+        if m:
+            entry["jurnal"] = m.group(1).strip()
+
+    # ── Abstract: cari blok teks setelah "Abstract" ──
+    abstract = "-"
+    for i, line in enumerate(lines):
+        if re.match(r"^(abstract|abstrak)[:\s]*$", line.lower()):
+            # Ambil beberapa baris setelahnya
+            abstract_lines = []
+            for j in range(i+1, min(i+15, len(lines))):
+                if re.match(r"^(keywords|istilah|introduction|pendahuluan)", lines[j].lower()):
+                    break
+                abstract_lines.append(lines[j])
+            abstract = " ".join(abstract_lines)[:500]
+            break
+    if abstract != "-":
+        entry["abstract"] = abstract
+
+    # ── Metode: lebih pintar ──
+    metode_map = [
+        (r"\bregression\b", "Regression"),
+        (r"\blogistic regression\b", "Logistic Regression"),
+        (r"\blinear regression\b", "Linear Regression"),
+        (r"\bpanel data\b", "Panel Data"),
+        (r"\bfixed.?effect\b", "Fixed Effect"),
+        (r"\brandom.?effect\b", "Random Effect"),
+        (r"\bgmm\b", "GMM"),
+        (r"\bfe\b.*\brb\b", "FE-RE"),
+        (r"\banova\b", "ANOVA"),
+        (r"\bmeta.?analysis\b", "Meta-Analysis"),
+        (r"\bsystematic review\b", "Systematic Review"),
+        (r"\bliterature review\b", "Literature Review"),
+        (r"\bsurvey\b", "Survey"),
+        (r"\bquestionnaire\b", "Questionnaire"),
+        (r"\bexperiment\b", "Experiment"),
+        (r"\bsimulation\b", "Simulation"),
+        (r"\bqualitative\b", "Qualitative"),
+        (r"\bquantitative\b", "Quantitative"),
+        (r"\bmixed.?method\b", "Mixed Method"),
+        (r"\bmachine learning\b", "Machine Learning"),
+        (r"\bdeep learning\b", "Deep Learning"),
+        (r"\bneural network\b", "Neural Network"),
+        (r"\brandom forest\b", "Random Forest"),
+        (r"\bsvm\b", "SVM"),
+        (r"\bdescriptive\b", "Descriptive"),
+        (r"\bcorrelation\b", "Correlation"),
+        (r"\bpath analysis\b", "Path Analysis"),
+        (r"\bsem\b", "SEM"),
+        (r"\bpsychometric\b", "Psychometric"),
+    ]
     metode_found = []
-    for key, val in metode_map.items():
-        if key in text_lower:
-            metode_found.append(val)
+    for pattern, name in metode_map:
+        if re.search(pattern, text_lower):
+            metode_found.append(name)
     if metode_found:
         entry["metode"] = ", ".join(metode_found[:3])
 
-    # ── Sampel: cari angka + kata kunci ──
+    # ── Sampel: lebih banyak pola ──
     sample_patterns = [
-        r"(\d[\d,.]*)\s*(?:participants|subjects|respondents|samples|patients)",
+        r"(\d[\d,.]*)\s*(?:participants|subjects|respondents|samples|patients|firms|companies|banks|countries|observations)",
         r"sample\s*(?:of|size|n)\s*[:=]?\s*(\d[\d,.]*)",
         r"(?:n|N)\s*=\s*(\d[\d,.]*)",
+        r"(?:data|data set|dataset)\s*(?:of|comprising|including)\s*(\d[\d,.]*)",
+        r"(?:period|years?)\s*(?:of|from)\s*(\d{4})\s*(?:to|until|-|–)\s*(\d{4})",
     ]
     for pat in sample_patterns:
         m = re.search(pat, text, re.I)
@@ -675,26 +710,54 @@ def parse_offline(text: str, filename: str) -> dict:
             entry["sampel"] = m.group(1).strip()
             break
 
-    # ── Teori/Model: cari nama teori ──
+    # ── Teori/Model: lebih lengkap ──
     teori_keywords = [
-        "theory of", "theories of", "model of", "framework of",
-        "stakeholder theory", "agency theory", "signaling theory",
-        "modern portfolio", "efficient market", "behavioral finance",
-        "capital asset pricing", "apt", "fama", "black-scholes",
+        ("stakeholder theory", "Stakeholder Theory"),
+        ("agency theory", "Agency Theory"),
+        ("signaling theory", "Signaling Theory"),
+        ("resource-based view", "RBV"),
+        ("dynamic capabilities", "Dynamic Capabilities"),
+        ("modern portfolio theory", "MPT"),
+        ("efficient market hypothesis", "EMH"),
+        ("behavioral finance", "Behavioral Finance"),
+        ("capital asset pricing", "CAPM"),
+        ("fama", "Fama-French"),
+        ("black-scholes", "Black-Scholes"),
+        ("arbitrage pricing", "APT"),
+        ("pecking order", "Pecking Order"),
+        ("trade-off theory", "Trade-off Theory"),
+        ("windows of opportunity", "Window of Opportunity"),
+        ("absorptive capacity", "Absorptive Capacity"),
+        ("diffusion of innovation", "DOI Theory"),
+        ("technology acceptance", "TAM"),
+        ("task-technology fit", "TTF"),
+        ("job demands", "JD-R Model"),
+        ("self-determination", "SDT"),
+        ("social cognitive", "Social Cognitive Theory"),
+        ("planned behavior", "TPB"),
     ]
-    for kw in teori_keywords:
+    teori_found = []
+    for kw, name in teori_keywords:
         if kw in text_lower:
-            # Ambil konteks sekitar
-            idx = text_lower.index(kw)
-            snippet = text[max(0,idx-20):idx+60].strip()
-            entry["teori"] = snippet[:80]
+            teori_found.append(name)
+    if teori_found:
+        entry["teori"] = ", ".join(teori_found[:3])
+
+    # ── Variabel: dari judul/abstract ──
+    # Cari pola "X terhadap Y" atau "X and Y"
+    var_patterns = [
+        r"(?:pengaruh|effect|impact|influence)\s+(?:\w+\s+){0,5}(?:terhadap|on|of)\s+",
+        r"(?:between|among)\s+",
+        r"(?:relationship|correlation)\s+(?:between|among)\s+",
+    ]
+    for pat in var_patterns:
+        m = re.search(pat, text_lower)
+        if m:
+            snippet = text[m.start():m.start()+100]
+            entry["variabel_x"] = snippet[:60]
             break
 
     return entry
-
-def parse_with_ai(text: str, filename: str) -> dict:
-    """Wrapper: pakai offline parser (AI sudah dihapus)."""
-    return parse_offline(text, filename)
 
 def build_excel(entries: list, output_path: Path, ai_mode: bool):
     from openpyxl import Workbook
@@ -799,16 +862,10 @@ def run_extract(outdir: Path, ai_key: str | None):
             continue
         print(f"[{i}/{len(pdfs)}] {pdf.name[:60]}...")
         text = extract_pdf_text(pdf)
-        entry = parse_offline(text, pdf.name)
-        # Merge data dari CSV jika ada
-        meta = csv_rows.get(pdf.name[7:57] if pdf.name.startswith("[") else pdf.name[:50], {})
-        if meta:
-            if entry["penulis"] == "-":
-                entry["penulis"] = meta.get("Authors", "-") or "-"
-            if entry["tahun"] == "-":
-                entry["tahun"] = str(meta.get("Year", "-") or "-")
-            if entry["jurnal"] == "-":
-                entry["jurnal"] = meta.get("Journal", "-") or "-"
+        # Cari metadata dari CSV
+        csv_key = pdf.name[7:57] if pdf.name.startswith("[") else pdf.name[:50]
+        meta = csv_rows.get(csv_key, {})
+        entry = parse_offline(text, pdf.name, meta)
         entries.append(entry)
         done_entries[pdf_key] = entry
         # Simpan progress setiap 5 file
