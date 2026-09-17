@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 """
-jurnal_finder.py - SATU tool untuk cari + download + analisis jurnal skripsi.
+jurnal_finder.py - Cari & download jurnal ilmiah GRATIS (tanpa auth).
 
 Alur (dipandu, boleh Bahasa Indonesia):
   1. Ceritakan topik / judul / variabel  → otomatis diterjemahkan ke Inggris (gratis)
-  2. Login SSO kampus SEKALI via browser → sesi dipakai untuk download PDF paywall
-  3. Tool mencari (OpenAlex, gratis tanpa key) + download semua yang bisa
+  2. Tool mencari (OpenAlex + DOAJ + arXiv + CrossRef, gratis tanpa key)
+  3. Download semua PDF yang bisa diakses gratis
   4. Pilihan: ekstrak semua PDF jadi tabel Excel analisis perbandingan
 
-Yang TIDAK disimpan tool ini: password SSO (kamu ketik sendiri di browser),
-API key apa pun untuk tahap 1-3 (semuanya gratis tanpa daftar).
+Sumber pencarian (semua gratis, tanpa API key):
+  - OpenAlex: ~250M paper, metadata lengkap + OA links
+  - DOAJ: jurnal open access, PDF langsung via OJS
+  - arXiv: preprint Komputer, AI, Matematika, Fisika
+  - CrossRef: metadata dari Scopus/ScienceDirect, DOI + cross-ref
+
+Download: hanya dari sumber yang menyediakan PDF gratis.
+Tidak perlu login, API key, atau email.
 
 Pakai:
   python jurnal_finder.py            # mode dipandu (disarankan)
@@ -29,11 +35,11 @@ import requests
 # ── Config ─────────────────────────────────────────────────────────────────
 OPENALEX_API   = "https://api.openalex.org/works"
 MYMEMORY_API   = "https://api.mymemory.translated.net/get"
-UNPAYWALL_API  = "https://api.unpaywall.org/v2/{doi}"
 OPENROUTER_API = "https://openrouter.ai/api/v1/chat/completions"
+DOAJ_API       = "https://doaj.org/api/search/articles"
+ARXIV_API      = "https://export.arxiv.org/api/query"
+CROSSREF_API   = "https://api.crossref.org/works"
 
-SESSION_FILE = Path("./.session_sciencedirect.json")
-LOGIN_URL    = "https://www.sciencedirect.com/"
 DOWNLOAD_DIR = Path("./jurnal_download")
 
 OPENROUTER_MODEL = "openai/gpt-oss-120b:free"
@@ -148,16 +154,13 @@ def norm_openalex(w: dict) -> dict:
     }
 
 def search_openalex(query: str, limit: int = 20,
-                    year_start: int = None, year_end: int = None,
-                    email: str = "") -> list:
+                    year_start: int = None, year_end: int = None) -> list:
     info(f"Mencari: '{query}' ...")
     params = {"search": query, "per-page": min(limit, 200),
               "sort": "cited_by_count:desc", "select": ",".join([
                   "id", "doi", "title", "publication_year", "authorships",
                   "cited_by_count", "open_access", "primary_location",
                   "best_oa_location"])}
-    if email:
-        params["mailto"] = email
     filters = []
     if year_start:
         filters.append(f"from_publication_date:{year_start}-01-01")
@@ -185,83 +188,252 @@ def search_openalex(query: str, limit: int = 20,
     return []
 
 # ═══════════════════════════════════════════════════════════════════════════
-# TAHAP 3 — Login SSO (browser) + download
+# TAHAP 2b — Cari jurnal via DOAJ (Directory of Open Access Journals)
+# DOAJ hanya index journal open access → semua fulltext tersedia gratis.
 # ═══════════════════════════════════════════════════════════════════════════
-def load_session() -> requests.Session | None:
-    if not SESSION_FILE.exists():
+def search_doaj(query: str, limit: int = 10) -> list:
+    """Cari artikel di DOAJ. Return list dict dengan format serupa OpenAlex."""
+    info(f"Mencari di DOAJ: '{query}' ...")
+    try:
+        resp = requests.get(
+            f"{DOAJ_API}/{requests.utils.quote(query)}",
+            params={"page": 1, "pageSize": min(limit, 100)},
+            headers={**HEADERS, "Accept": "application/json"},
+            timeout=20,
+        )
+    except requests.exceptions.RequestException as e:
+        err(f"DOAJ gagal: {e}")
+        return []
+
+    if resp.status_code != 200:
+        err(f"DOAJ HTTP {resp.status_code}")
+        return []
+
+    data = resp.json()
+    results = []
+    for item in data.get("results", []):
+        bib = item.get("bibjson", {})
+        doi = next(
+            (i.get("id") for i in bib.get("identifier", []) if i.get("type") == "doi"),
+            None,
+        )
+        # Ambil fulltext URL
+        fulltext_url = None
+        for link in bib.get("link", []):
+            if link.get("content_type") == "PDF":
+                fulltext_url = link.get("url")
+                break
+        if not fulltext_url:
+            for link in bib.get("link", []):
+                if link.get("type") == "fulltext":
+                    fulltext_url = link.get("url")
+                    break
+
+        # Ekstrak direct PDF download URL dari halaman OJS
+        pdf_url = _extract_ojs_pdf(fulltext_url) if fulltext_url else None
+
+        authors = [{"name": a.get("name", "?")} for a in bib.get("author", [])[:3]]
+        results.append({
+            "paperId": f"doi:{doi.lower()}" if doi else f"doaj:{item.get('id', '')}",
+            "title": bib.get("title") or "Untitled",
+            "authors": authors,
+            "year": int(bib.get("year") or 0) or None,
+            "externalIds": {"DOI": doi} if doi else {},
+            "citationCount": 0,
+            "openAccessPdf": {"url": pdf_url or fulltext_url} if (pdf_url or fulltext_url) else None,
+            "journal": bib.get("journal", {}).get("title") or "-",
+            "_source": "doaj",
+        })
+    ok(f"DOAJ: {len(results)} artikel ditemukan")
+    return results
+
+
+def _extract_ojs_pdf(article_url: str) -> str | None:
+    """Ekstrak direct PDF download URL dari halaman OJS (Open Journal Systems)."""
+    if not article_url:
         return None
     try:
-        data = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    session = requests.Session()
-    session.headers.update(HEADERS)
-    for c in data.get("cookies", []):
-        try:
-            session.cookies.set(c["name"], c.get("value", ""),
-                                domain=c.get("domain", ""), path=c.get("path", "/"))
-        except Exception:
-            continue
-    return session if session.cookies else None
-
-def looks_like_login_wall(resp: requests.Response) -> bool:
-    url = (getattr(resp, "url", "") or "").lower()
-    if resp.status_code in (401, 403):
-        return True
-    return any(m in url for m in ("login", "signin", "sign-in", "sso", "shibboleth", "authenticate"))
-
-def cmd_login():
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        err("playwright belum terinstall. Jalankan:")
-        err("  pip install -r requirements.txt && python -m playwright install chromium")
-        sys.exit(1)
-    bold("\n═══════════════════════════════════════")
-    bold("  🔑 Login kampus (sekali saja)")
-    bold("═══════════════════════════════════════\n")
-    print("Browser akan terbuka. Langkah kamu:")
-    print("  1. Klik Sign in → Sign in via your institution → cari UNDIP")
-    print("  2. Login SSO seperti biasa (kamu yang ketik password sendiri)")
-    print("  3. Pastikan halaman terbuka sebagai user institusi")
-    print("  4. Kembali ke sini, tekan ENTER\n")
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
-        ctx = browser.new_context()
-        ctx.new_page().goto(LOGIN_URL, wait_until="domcontentloaded")
-        input("Kalau sudah login di browser, tekan ENTER di sini... ")
-        ctx.storage_state(path=str(SESSION_FILE))
-        browser.close()
-    if load_session():
-        ok(f"Sesi tersimpan di {SESSION_FILE} — JANGAN upload/commit file ini.")
-    else:
-        err("Gagal menyimpan sesi (tidak ada cookie). Ulangi login.")
-
-def get_free_pdf_url(doi: str, email: str) -> str | None:
-    if not doi:
-        return None
-    try:
-        resp = requests.get(UNPAYWALL_API.format(doi=doi),
-                            params={"email": email}, timeout=10)
-        if resp.status_code == 200 and resp.json().get("is_oa"):
-            best = resp.json().get("best_oa_location", {})
-            return best.get("url_for_pdf") or best.get("url")
+        resp = requests.get(article_url, headers=HEADERS, timeout=15, allow_redirects=True)
+        if resp.status_code != 200:
+            return None
+        html = resp.text
+        import re
+        # Pattern 1: /article/download/{article_id}/{galley_id}/{...}
+        m = re.search(r'href="([^"]*article/download/\d+/\d+[^"]*)"', html)
+        if m:
+            url = m.group(1)
+            if not url.startswith("http"):
+                from urllib.parse import urljoin
+                url = urljoin(article_url, url)
+            return url
+        # Pattern 2: /article/view/{article_id}/{galley_id}
+        m = re.search(r'/article/view/(\d+)/(\d+)', html)
+        if m:
+            aid, gid = m.group(1), m.group(2)
+            base = article_url.split("/article/")[0]
+            return f"{base}/article/download/{aid}/{gid}"
+        # Pattern 3: href langsung ke PDF
+        m = re.search(r'href="([^"]*\.pdf[^"]*)"', html, re.I)
+        if m:
+            url = m.group(1)
+            if not url.startswith("http"):
+                from urllib.parse import urljoin
+                url = urljoin(article_url, url)
+            return url
     except Exception:
         pass
     return None
 
-def download_pdf(url: str, session: requests.Session | None, filepath: Path) -> str:
-    """Return 'ok' | 'login' | 'fail'."""
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TAHAP 2c — Cari jurnal via arXiv (preprint: Komputer, AI, Matematika, Fisika)
+# arXiv menyediakan PDF langsung tanpa paywall.
+# ═══════════════════════════════════════════════════════════════════════════
+def search_arxiv(query: str, limit: int = 10) -> list:
+    """Cari artikel di arXiv. Return list dict dengan format serupa OpenAlex."""
+    import re
+    info(f"Mencari di arXiv: '{query}' ...")
     try:
-        getter = session.get if session else requests.get
-        kwargs = dict(timeout=60, stream=True)
-        if session is None:
-            kwargs["headers"] = HEADERS
-        resp = getter(url, **kwargs)
+        resp = requests.get(
+            ARXIV_API,
+            params={"search_query": f"all:{query}", "max_results": min(limit, 50)},
+            headers=HEADERS,
+            timeout=20,
+        )
+    except requests.exceptions.RequestException as e:
+        err(f"arXiv gagal: {e}")
+        return []
+
+    if resp.status_code != 200:
+        err(f"arXiv HTTP {resp.status_code}")
+        return []
+
+    xml = resp.text
+    entries = re.findall(r"<entry>(.*?)</entry>", xml, re.S)
+    results = []
+    for entry in entries:
+        title = re.findall(r"<title>(.*?)</title>", entry, re.S)
+        title = " ".join((title[0] or "").split()) if title else "Untitled"
+
+        # Authors
+        authors_raw = re.findall(r"<author>\s*<name>(.*?)</name>", entry, re.S)
+        authors = [{"name": a.strip()} for a in authors_raw[:3]]
+
+        # PDF link
+        pdf_url = None
+        for link in re.findall(r'<link[^>]+href="([^"]+)"', entry):
+            if "pdf" in link.lower():
+                pdf_url = link
+                break
+
+        # DOI (opsional, tidak semua arXiv paper punya DOI)
+        doi = None
+        doi_match = re.findall(r"<doi>(.*?)</doi>", entry, re.S)
+        if doi_match and doi_match[0].strip():
+            doi = doi_match[0].strip()
+
+        # Published year
+        pub = re.findall(r"<published>(.*?)</published>", entry, re.S)
+        year = int(pub[0][:4]) if pub and pub[0][:4].isdigit() else None
+
+        # arXiv ID
+        arxiv_id = re.findall(r"<id>(.*?)</id>", entry, re.S)
+        arxiv_id = arxiv_id[0].strip() if arxiv_id else ""
+
+        results.append({
+            "paperId": f"arxiv:{arxiv_id}" if arxiv_id else f"doi:{doi.lower()}" if doi else "",
+            "title": title,
+            "authors": authors,
+            "year": year,
+            "externalIds": {"DOI": doi, "arXiv": arxiv_id} if doi else {"arXiv": arxiv_id},
+            "citationCount": 0,
+            "openAccessPdf": {"url": pdf_url} if pdf_url else None,
+            "journal": "arXiv",
+            "_source": "arxiv",
+        })
+    ok(f"arXiv: {len(results)} artikel ditemukan")
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TAHAP 2d — Cari jurnal via CrossRef (metadata dari Scopus/ScienceDirect)
+# CrossRef menyediakan metadata lengkap dari ~150M paper. Gratis tanpa key.
+# Tidak ada PDF langsung, tapi DOI-nya bisa dipakai untuk cross-reference.
+# ═══════════════════════════════════════════════════════════════════════════
+def search_crossref(query: str, limit: int = 10) -> list:
+    """Cari artikel di CrossRef. Return list dict dengan format serupa OpenAlex."""
+    info(f"Mencari di CrossRef: '{query}' ...")
+    try:
+        resp = requests.get(
+            CROSSREF_API,
+            params={
+                "query": query,
+                "rows": min(limit, 50),
+                "select": "DOI,title,author,abstract,link,published-print,published-online",
+            },
+            headers={**HEADERS, "Accept": "application/json"},
+            timeout=20,
+        )
+    except requests.exceptions.RequestException as e:
+        err(f"CrossRef gagal: {e}")
+        return []
+
+    if resp.status_code != 200:
+        err(f"CrossRef HTTP {resp.status_code}")
+        return []
+
+    data = resp.json()
+    results = []
+    for item in data.get("message", {}).get("items", []):
+        doi = item.get("DOI")
+        title_list = item.get("title", [])
+        title = title_list[0] if title_list else "Untitled"
+
+        # Authors
+        authors_raw = item.get("author", [])
+        authors = [{"name": f"{a.get('given', '')} {a.get('family', '')}".strip()} for a in authors_raw[:3]]
+
+        # Year
+        year = None
+        for date_field in ["published-print", "published-online"]:
+            parts = item.get(date_field, {}).get("date-parts", [[]])
+            if parts and parts[0] and parts[0][0]:
+                year = parts[0][0]
+                break
+
+        # PDF link (jika ada)
+        pdf_url = None
+        for link in item.get("link", []):
+            if "pdf" in link.get("content-type", ""):
+                pdf_url = link.get("URL")
+                break
+
+        results.append({
+            "paperId": f"doi:{doi.lower()}" if doi else "",
+            "title": title,
+            "authors": authors,
+            "year": year,
+            "externalIds": {"DOI": doi} if doi else {},
+            "citationCount": 0,
+            "openAccessPdf": {"url": pdf_url} if pdf_url else None,
+            "journal": "-",
+            "_source": "crossref",
+        })
+    ok(f"CrossRef: {len(results)} artikel ditemukan")
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TAHAP 3 — Download PDF (gratis saja, tanpa auth)
+# ═══════════════════════════════════════════════════════════════════════════
+def download_pdf(url: str, filepath: Path) -> str:
+    """Download PDF tanpa auth. Return 'ok' | 'fail'."""
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=60, stream=True)
     except requests.exceptions.RequestException:
         return "fail"
-    if looks_like_login_wall(resp):
-        return "login"
+    if resp.status_code in (401, 403):
+        return "fail"
     try:
         resp.raise_for_status()
         with open(filepath, "wb") as f:
@@ -277,19 +449,6 @@ def download_pdf(url: str, session: requests.Session | None, filepath: Path) -> 
         filepath.unlink(missing_ok=True)
         return "fail"
 
-def resolve_sd_pdf_url(doi: str, session: requests.Session) -> tuple[str | None, str]:
-    """Ikuti DOI; kalau mendarat di artikel ScienceDirect → URL PDF. Status: ok|login|nonsd|error."""
-    try:
-        resp = session.get(f"https://doi.org/{doi}", timeout=30, allow_redirects=True)
-    except requests.exceptions.RequestException as e:
-        return None, f"error: {e}"
-    if looks_like_login_wall(resp):
-        return None, "login"
-    final = (getattr(resp, "url", "") or "").split("?")[0].rstrip("/")
-    if "sciencedirect.com/science/article/pii/" not in final:
-        return None, "nonsd"
-    return final + "/pdfft?isDTMRedir=true&download=true", "ok"
-
 def safe_filename(title: str, year=None, max_len: int = 80) -> str:
     keep = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_")
     name = "".join(c if c in keep else "_" for c in (title or ""))
@@ -297,12 +456,27 @@ def safe_filename(title: str, year=None, max_len: int = 80) -> str:
     return (f"[{year}] {name}" if year else name) + ".pdf"
 
 def run_search_download(queries: list[str], limit: int, year_start: int, year_end: int,
-                        email: str, session: requests.Session | None, outdir: Path):
+                        outdir: Path):
     outdir.mkdir(parents=True, exist_ok=True)
     all_papers, seen = [], set()
     for kw in queries:
         for p in search_openalex(kw, limit=limit, year_start=year_start,
-                                 year_end=year_end, email=email):
+                                 year_end=year_end):
+            key = (p.get("externalIds") or {}).get("DOI", "") or p.get("paperId")
+            if key and key not in seen:
+                seen.add(key)
+                all_papers.append(p)
+        for p in search_doaj(kw, limit=limit):
+            key = (p.get("externalIds") or {}).get("DOI", "") or p.get("paperId")
+            if key and key not in seen:
+                seen.add(key)
+                all_papers.append(p)
+        for p in search_arxiv(kw, limit=limit):
+            key = (p.get("externalIds") or {}).get("arXiv", "") or p.get("paperId")
+            if key and key not in seen:
+                seen.add(key)
+                all_papers.append(p)
+        for p in search_crossref(kw, limit=limit):
             key = (p.get("externalIds") or {}).get("DOI", "") or p.get("paperId")
             if key and key not in seen:
                 seen.add(key)
@@ -310,7 +484,6 @@ def run_search_download(queries: list[str], limit: int, year_start: int, year_en
         time.sleep(1)
     bold(f"\nTotal unik: {len(all_papers)} paper\n")
     results, manual, ndone = [], [], 0
-    expired = False
     for i, paper in enumerate(all_papers, 1):
         title   = paper.get("title", "Untitled")
         year    = paper.get("year")
@@ -320,52 +493,51 @@ def run_search_download(queries: list[str], limit: int, year_start: int, year_en
         status, source = "❌ Manual", "-"
         pdf_url = (paper.get("openAccessPdf") or {}).get("url")
         if pdf_url:
-            source = "Open Access"
-        elif doi:
-            pdf_url = get_free_pdf_url(doi, email)
-            source = "Unpaywall"
+            src = paper.get("_source", "")
+            source = {"doaj": "DOAJ", "arxiv": "arXiv"}.get(src, "Open Access")
+
+        # ── Coba download dari URL yang sudah ada ──
         if pdf_url:
-            if download_pdf(pdf_url, None, outdir / safe_filename(title, year)) == "ok":
+            if download_pdf(pdf_url, outdir / safe_filename(title, year)) == "ok":
                 ok("Downloaded (gratis)"); status, ndone = "✅ Downloaded", ndone + 1
             else:
-                time.sleep(5)  # publisher kadang throttle → coba sekali lagi
-                if download_pdf(pdf_url, None, outdir / safe_filename(title, year)) == "ok":
+                time.sleep(3)
+                if download_pdf(pdf_url, outdir / safe_filename(title, year)) == "ok":
                     ok("Downloaded (gratis)"); status, ndone = "✅ Downloaded", ndone + 1
-                else:
-                    warn("URL gratis gagal" + (" → coba sesi kampus" if session else ""))
-                    pdf_url = None
-        if status != "✅ Downloaded" and doi and session:
-            sd_url, st = resolve_sd_pdf_url(doi, session)
-            if st == "login":
-                err("Sesi kampus habis → yang sisa masuk list manual.")
-                expired = True
-            elif st == "ok":
-                dl = download_pdf(sd_url, session, outdir / safe_filename(title, year))
-                if dl == "ok":
-                    ok("Downloaded (akses kampus)"); status, source = "✅ Downloaded", "Kampus (SSO)"
-                    ndone += 1
-                elif dl == "login":
-                    err("Sesi kampus habis → yang sisa masuk list manual.")
-                    expired = True
+
+        # ── Cross-reference: cari judul di DOAJ ──
+        if status != "✅ Downloaded" and title and title != "Untitled":
+            doaj_hits = search_doaj(title[:80], limit=1)
+            for hit in doaj_hits:
+                hit_url = (hit.get("openAccessPdf") or {}).get("url")
+                if hit_url and download_pdf(hit_url, outdir / safe_filename(title, year)) == "ok":
+                    ok("Downloaded (DOAJ cross-ref)"); status, source, ndone = "✅ Downloaded", "DOAJ", ndone + 1
+                    break
+
+        # ── Cross-reference: cari judul di arXiv ──
+        if status != "✅ Downloaded" and title and title != "Untitled":
+            arxiv_hits = search_arxiv(title[:80], limit=1)
+            for hit in arxiv_hits:
+                hit_url = (hit.get("openAccessPdf") or {}).get("url")
+                if hit_url and download_pdf(hit_url, outdir / safe_filename(title, year)) == "ok":
+                    ok("Downloaded (arXiv cross-ref)"); status, source, ndone = "✅ Downloaded", "arXiv", ndone + 1
+                    break
+
+        # ── Cross-reference: cari DOI di CrossRef untuk PDF link ──
+        if status != "✅ Downloaded" and doi:
+            xref_hits = search_crossref(f"doi:{doi}", limit=1)
+            for hit in xref_hits:
+                hit_url = (hit.get("openAccessPdf") or {}).get("url")
+                if hit_url and download_pdf(hit_url, outdir / safe_filename(title, year)) == "ok":
+                    ok("Downloaded (CrossRef cross-ref)"); status, source, ndone = "✅ Downloaded", "CrossRef", ndone + 1
+                    break
+
         if status != "✅ Downloaded":
             manual.append({"title": title, "doi": doi or "-",
                            "year": year, "link": f"https://doi.org/{doi}" if doi else "-"})
         results.append({"No": i, "Title": title, "Authors": authors, "Year": year,
                         "DOI": doi or "-", "Citations": paper.get("citationCount", 0),
                         "Status": status, "Source": source if "Downloaded" in status else "-"})
-        if expired:
-            # paper sisa tetap dicatat sebagai manual
-            for j, paper2 in enumerate(all_papers[i:], i + 1):
-                d2 = (paper2.get("externalIds") or {}).get("DOI")
-                manual.append({"title": paper2.get("title", "Untitled"), "doi": d2 or "-",
-                               "year": paper2.get("year"),
-                               "link": f"https://doi.org/{d2}" if d2 else "-"})
-                results.append({"No": j, "Title": paper2.get("title", "Untitled"),
-                                "Authors": ", ".join(a["name"] for a in paper2.get("authors", [])[:3]),
-                                "Year": paper2.get("year"), "DOI": d2 or "-",
-                                "Citations": paper2.get("citationCount", 0),
-                                "Status": "❌ Manual", "Source": "-"})
-            break
     if results:
         with open(outdir / "hasil_pencarian.csv", "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=list(results[0].keys()))
@@ -608,17 +780,6 @@ def interactive():
     if pakai != "n":
         ys, ye = int(tanya("   Dari tahun", default=2018)), int(tanya("   Sampai tahun", default=2024))
     limit = int(tanya("\n6️⃣  Cari berapa jurnal per keyword", default=10))
-    email = tanya("\n7️⃣  Email kamu (untuk akses PDF gratis)", default="user@email.com")
-
-    print("\n8️⃣  Login akun kampus (SSO) untuk download PDF paywall?")
-    print("   Kalau dilewati, hanya PDF gratis yang terdownload.")
-    session = None
-    if load_session() and input("   Sesi lama ditemukan, pakai lagi? (y/n) [y]: ").strip().lower() != "n":
-        session = load_session()
-        ok("Memakai sesi tersimpan.")
-    elif input("   Login sekarang? (y/n) [y]: ").strip().lower() != "n":
-        cmd_login()
-        session = load_session()
 
     print("\n" + "─" * 45)
     bold("  Ringkasan:")
@@ -626,13 +787,12 @@ def interactive():
     if ys:
         print(f"  📅 Tahun   : {ys} – {ye}")
     print(f"  📄 Jumlah  : {limit} per keyword")
-    print(f"  🔑 Sesi SSO: {'ya' if session else 'tidak (gratis saja)'}")
     print("─" * 45)
     if input("\nMulai cari + download? (y/n) [y]: ").strip().lower() == "n":
         print("Oke, dibatalin.")
         return
     print()
-    outdir = run_search_download(queries, limit, ys, ye, email, session, DOWNLOAD_DIR)
+    outdir = run_search_download(queries, limit, ys, ye, DOWNLOAD_DIR)
 
     print("\n9️⃣  Ekstrak semua jurnal jadi tabel Excel analisis?")
     print("   - Dengan OpenRouter key (gratis): kolom X/Y/metode/hasil/teori terisi AI")
@@ -658,8 +818,6 @@ Contoh:
     parser.add_argument("--keyword-en", nargs="+", default=None, help="Keyword Inggris langsung (lewati translate)")
     parser.add_argument("-n", "--limit", type=int, default=10)
     parser.add_argument("--tahun", nargs=2, type=int, metavar=("DARI", "SAMPAI"), default=None)
-    parser.add_argument("-e", "--email", default="user@email.com")
-    parser.add_argument("--skip-login", action="store_true", help="Tanpa sesi SSO (hanya PDF gratis)")
     parser.add_argument("--no-extract", action="store_true")
     parser.add_argument("--ai-key", default=None, help="OpenRouter key untuk ekstrak AI")
     args = parser.parse_args()
@@ -674,8 +832,7 @@ Contoh:
         ye, _ = translate_id_en(args.y) if args.y else ("", "")
         queries = list(dict.fromkeys(q for q in [te, f"{xe} {ye}".strip()] if q))
     ys, ye = (args.tahun[0], args.tahun[1]) if args.tahun else (None, None)
-    session = None if args.skip_login else load_session()
-    outdir = run_search_download(queries, args.limit, ys, ye, args.email, session, DOWNLOAD_DIR)
+    outdir = run_search_download(queries, args.limit, ys, ye, DOWNLOAD_DIR)
     if not args.no_extract:
         run_extract(outdir, args.ai_key)
 

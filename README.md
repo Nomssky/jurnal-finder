@@ -1,48 +1,75 @@
-# Jurnal Finder — 1 Tool: Cari → Download → Analisis
+# Jurnal Finder
 
-Satu script (`jurnal_finder.py`) untuk seluruh alur jurnal skripsi.
-Boleh input **Bahasa Indonesia** — otomatis diterjemahkan gratis.
+> Cari & download jurnal ilmiah secara gratis. Tanpa auth, tanpa login, tanpa API key.
 
-## Alur
+## Features
 
-1. **Ceritakan maumu** — topik / judul / variabel X / Y (Indonesia OK)
-2. **Translate otomatis** ke Inggris (MyMemory, gratis tanpa daftar;
-   ada kamus offline bila internet/API gagal; keyword bisa diedit manual)
-3. **Login SSO kampus sekali** via browser (kamu ketik password sendiri —
-   script hanya menyimpan cookie sesi, bukan password)
-4. **Cari + download massal** — OpenAlex (gratis tanpa key, meliput artikel
-   yang sama terindeks di Scopus/ScienceDirect) → PDF gratis → sesi kampus
-   → sisa paywall masuk `manual_download.csv` berisi link DOI
-5. **Pilihan ekstrak** — jadikan `tabel_perbandingan.xlsx`:
-   tanpa key = tabel metadata; dengan OpenRouter key (gratis) = analisis AI
-   (X/Y/metode/hasil/teori/sampel + sheet gap analisis)
+- Cari paper dari **4 sumber** sekaligus (OpenAlex, DOAJ, arXiv, CrossRef)
+- Auto-translate Bahasa Indonesia → Inggris
+- Download PDF otomatis (termasuk preprint dari arXiv)
+- Export hasil ke CSV
+- **100% gratis**, tidak perlu daftar atau login
 
-## Instalasi
+## Install
+
+### Linux / macOS
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python -m playwright install chromium   # sekali saja, untuk login SSO
-# Opsional: sudo apt install poppler-utils (ekstrak PDF lebih akurat)
+git clone <repo-url> ~/.jf && cd ~/.jf && bash install.sh
 ```
 
-## Pemakaian
+### Windows
+
+```cmd
+git clone <repo-url> %USERPROFILE%\.jf
+cd %USERPROFILE%\.jf
+install.bat
+```
+
+## Usage
 
 ```bash
-python jurnal_finder.py
-python jurnal_finder.py --topik "pengaruh inflasi terhadap harga saham" --x inflasi --y "harga saham" -n 10
-python jurnal_finder.py --keyword-en "inflation stock prices" --skip-login --no-extract
+# Keyword Inggris langsung
+jf --keyword-en "machine learning" -n 10
+
+# Bahasa Indonesia (auto-translate)
+jf --topik "pengaruh inflasi terhadap harga saham" -n 10
+
+# Filter tahun
+jf --keyword-en "deep learning" --tahun 2020 2024
+
+# Mode interaktif
+jf
 ```
 
-Hasil ada di `./jurnal_download/` (`hasil_pencarian.csv`,
-`manual_download.csv`, PDF, `tabel_perbandingan.xlsx`).
+## Output
 
-## Catatan akses
+```
+./jurnal_download/
+├── *.pdf              # Jurnal yang berhasil didownload
+├── hasil_pencarian.csv    # Daftar semua paper
+└── manual_download.csv    # Paper yang perlu manual (jika ada)
+```
 
-- Tahap cari + translate + PDF gratis: **tanpa key, tanpa login apa pun**.
-- PDF paywall: dibuka lewat **sesi SSO** (login sekali di browser) atau
-  manual via link DOI dari jaringan kampus/VPN.
-- File sesi (`.session_*.json`) itu rahasia — sudah di-`.gitignore`,
-  jangan pernah di-commit/upload.
-- Riwayat pengujian ada di [`TEST_REPORT.md`](TEST_REPORT.md) (arsip versi lama).
+## How it works
+
+```
+Query → OpenAlex + DOAJ + arXiv + CrossRef
+         ↓
+    Search & deduplicate
+         ↓
+    Download PDF (OA links)
+         ↓
+    Cross-ref by title (arXiv/DOAJ)
+         ↓
+    PDF saved + CSV report
+```
+
+## Requirements
+
+- Python 3.10+
+- Tidak perlu API key
+
+## License
+
+MIT

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jurnal-finder"
+version = "2.0.0"
+description = "Cari & download jurnal ilmiah GRATIS (tanpa auth, boleh Bahasa Indonesia)"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Jurnal Finder"},
+]
+dependencies = [
+    "requests>=2.31.0",
+    "openpyxl>=3.1.0",
+    "pypdf>=4.0.0",
+    "pdfminer.six>=20221105",
+]
+
+[project.scripts]
+jurnal-finder = "jurnal_finder.cli:main"
+jf = "jurnal_finder.cli:main"
+
+[project.urls]
+Repository = "https://github.com/user/jurnal-finder"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["jurnal_finder*"]
