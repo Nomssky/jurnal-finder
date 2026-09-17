@@ -3,7 +3,6 @@ set -e
 
 INSTALL_DIR="$HOME/.jf"
 REPO_URL="${1:-}"
-OS="$(uname -s)"
 
 echo "📦 Installing Jurnal Finder..."
 
@@ -27,13 +26,26 @@ cd "$INSTALL_DIR"
 python3 -m venv .venv
 .venv/bin/pip install -q .
 
-# Bikin wrapper command
+# Bikin wrapper command dengan auto-update
 mkdir -p "$HOME/.local/bin"
-
-cat > "$HOME/.local/bin/jf" << 'EOF'
+cat > "$HOME/.local/bin/jf" << 'WRAPPER'
 #!/bin/bash
-exec "$HOME/.jf/.venv/bin/python3" -m jurnal_finder "$@"
-EOF
+INSTALL_DIR="$HOME/.jf"
+
+# Auto-update: pull latest setiap kali dijalankan
+if [ -d "$INSTALL_DIR/.git" ]; then
+    cd "$INSTALL_DIR"
+    CURRENT=$(git rev-parse HEAD)
+    git pull --quiet 2>/dev/null
+    NEW=$(git rev-parse HEAD)
+    if [ "$CURRENT" != "$NEW" ]; then
+        echo "🔄 Update ditemukan! Installing..."
+        .venv/bin/pip install -q .
+    fi
+fi
+
+exec "$INSTALL_DIR/.venv/bin/python3" -m jurnal_finder "$@"
+WRAPPER
 chmod +x "$HOME/.local/bin/jf"
 
 # Cek PATH
@@ -51,3 +63,5 @@ echo ""
 echo "Cara pakai:"
 echo "   jf --keyword-en \"machine learning\" -n 10"
 echo "   jf   # mode interaktif"
+echo ""
+echo "💡 Auto-update: jf akan otomatis update setiap kali dijalankan"
