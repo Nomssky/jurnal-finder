@@ -910,7 +910,6 @@ def menu_ekstrak():
     print(f"Ditemukan {len(pdfs)} PDF di {DOWNLOAD_DIR}/\n")
     print("Mode: 100% offline, tanpa API key, tidak perlu internet.")
     print("Resume: PDF yang sudah diekstrak akan di-skip.\n")
-    input("Tekan Enter untuk mulai ekstrak...")
 
     run_extract(DOWNLOAD_DIR, None)
     bold("\n✅ Selesai!\n")
