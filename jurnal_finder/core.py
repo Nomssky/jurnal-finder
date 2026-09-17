@@ -40,7 +40,7 @@ DOAJ_API       = "https://doaj.org/api/search/articles"
 ARXIV_API      = "https://export.arxiv.org/api/query"
 CROSSREF_API   = "https://api.crossref.org/works"
 
-DOWNLOAD_DIR = Path("./jurnal_download")
+DOWNLOAD_DIR = Path.home() / "jurnal_download"
 
 OPENROUTER_MODEL = "google/gemma-4-31b-it:free"
 OPENROUTER_KEY   = os.getenv("OPENROUTER_API_KEY", "")
