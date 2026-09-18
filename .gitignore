@@ -7,6 +7,8 @@ venv/
 .env
 dist/
 build/
+.mypy_cache/
+.pytest_cache/
 
 # Hasil download (jangan push PDF/Excel/CSV ke repo)
 jurnal_download/
@@ -14,6 +16,11 @@ jurnal_download/
 *.xlsx
 *.csv
 *.zip
+_extract_progress.json
+
+# opencode / node
+.opencode/
+node_modules/
 
 # OS
 .DS_Store

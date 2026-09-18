@@ -25,8 +25,6 @@ Pakai:
 import argparse
 import csv
 import json
-import os
-import sys
 import time
 from pathlib import Path
 
@@ -35,15 +33,11 @@ import requests
 # ── Config ─────────────────────────────────────────────────────────────────
 OPENALEX_API   = "https://api.openalex.org/works"
 MYMEMORY_API   = "https://api.mymemory.translated.net/get"
-OPENROUTER_API = "https://openrouter.ai/api/v1/chat/completions"
 DOAJ_API       = "https://doaj.org/api/search/articles"
 ARXIV_API      = "https://export.arxiv.org/api/query"
 CROSSREF_API   = "https://api.crossref.org/works"
 
 DOWNLOAD_DIR = Path.home() / "jurnal_download"
-
-OPENROUTER_MODEL = "google/gemma-4-31b-it:free"
-OPENROUTER_KEY   = os.getenv("OPENROUTER_API_KEY", "")
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
@@ -796,7 +790,7 @@ def build_excel(entries: list, output_path: Path, ai_mode: bool):
         ws2.freeze_panes = "A3"
     wb.save(str(output_path))
 
-def run_extract(outdir: Path, ai_key: str | None):
+def run_extract(outdir: Path):
     pdfs = sorted(outdir.glob("*.pdf"))
     if not pdfs:
         err(f"Tidak ada PDF di {outdir} — tidak ada yang bisa diekstrak.")
@@ -925,7 +919,7 @@ def menu_cari():
     print("  - 100% offline, tanpa API key")
     print("  - Resume: PDF sudah diproses akan di-skip")
     if input("  Ekstrak sekarang? (y/n) [y]: ").strip().lower() != "n":
-        run_extract(outdir, None)
+        run_extract(outdir)
 
     bold("\n✅ Selesai! Cek folder ~/jurnal_download/\n")
 
@@ -945,12 +939,12 @@ def menu_ekstrak():
     print("Mode: 100% offline, tanpa API key, tidak perlu internet.")
     print("Resume: PDF yang sudah diekstrak akan di-skip.\n")
 
-    run_extract(DOWNLOAD_DIR, None)
+    run_extract(DOWNLOAD_DIR)
     bold("\n✅ Selesai!\n")
 
 def menu_folder():
     """Menu: Ganti folder output."""
-    global DOWNLOAD_DIR, EXTRACT_DIR
+    global DOWNLOAD_DIR
     bold("\n┌─────────────────────────────────────┐")
     bold("│  📁 Folder Output                   │")
     bold("└─────────────────────────────────────┘\n")
@@ -1006,7 +1000,7 @@ Contoh:
   python jurnal_finder.py
   python jurnal_finder.py --topik "pengaruh inflasi terhadap harga saham" -n 10
   python jurnal_finder.py --keyword-en "inflation stock prices" --no-extract
-  python jurnal_finder.py --extract-only --ai-key YOUR_KEY   # ekstrak ulang
+  python jurnal_finder.py --extract-only   # ekstrak PDF yang sudah ada
         """)
     parser.add_argument("--topik", default=None, help="Topik (boleh Indonesia, auto-translate)")
     parser.add_argument("--x", default="", help="Variabel X")
@@ -1024,7 +1018,7 @@ Contoh:
         if not outdir.exists() or not list(outdir.glob("*.pdf")):
             err(f"Tidak ada PDF di {outdir}")
             return
-        run_extract(outdir, None)
+        run_extract(outdir)
         return
 
     if not args.topik and not args.keyword_en:
@@ -1039,7 +1033,7 @@ Contoh:
     ys, ye = (args.tahun[0], args.tahun[1]) if args.tahun else (None, None)
     outdir = run_search_download(queries, args.limit, ys, ye, DOWNLOAD_DIR)
     if not args.no_extract:
-        run_extract(outdir, None)
+        run_extract(outdir)
 
 if __name__ == "__main__":
     main()

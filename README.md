@@ -15,14 +15,19 @@
 ### Linux / macOS
 
 ```bash
-git clone <repo-url> ~/.jf && cd ~/.jf && bash install.sh
+git clone <repo-url> ~/.jf && bash ~/.jf/install.sh
+```
+
+Atau kalau repo sudah ada di folder lain:
+
+```bash
+bash install.sh <repo-url>   # opsional: clone/update dari remote
 ```
 
 ### Windows
 
 ```cmd
 git clone <repo-url> %USERPROFILE%\.jf
-cd %USERPROFILE%\.jf
 install.bat
 ```
 
@@ -38,17 +43,23 @@ jf --topik "pengaruh inflasi terhadap harga saham" -n 10
 # Filter tahun
 jf --keyword-en "deep learning" --tahun 2020 2024
 
+# Hanya ekstrak PDF yang sudah ada (tanpa download ulang)
+jf --extract-only
+
 # Mode interaktif
 jf
 ```
 
 ## Output
 
+Semua hasil disimpan di `~/jurnal_download/`:
+
 ```
-./jurnal_download/
-├── *.pdf              # Jurnal yang berhasil didownload
-├── hasil_pencarian.csv    # Daftar semua paper
-└── manual_download.csv    # Paper yang perlu manual (jika ada)
+~/jurnal_download/
+├── *.pdf                    # Jurnal yang berhasil didownload
+├── hasil_pencarian.csv      # Daftar semua paper
+├── manual_download.csv      # Paper yang perlu manual (jika ada)
+└── tabel_perbandingan.xlsx  # Hasil ekstraksi PDF (jika ada)
 ```
 
 ## How it works
