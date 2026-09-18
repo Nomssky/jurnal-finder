@@ -140,20 +140,19 @@ if not exist "%BIN_DIR%" mkdir "%BIN_DIR%"
     echo set "INSTALL_DIR=%%USERPROFILE%%\.jf"
     echo if defined JF_INSTALL_DIR set "INSTALL_DIR=%%JF_INSTALL_DIR%%"
     echo.
-    echo if exist "%%INSTALL_DIR%%\.git" ^(
-    echo     cd /d "%%INSTALL_DIR%%"
-    echo     for /f "tokens=*" %%%%i in ^('git status --porcelain'^) do set "DIRTY=%%%%i"
-    echo     if not defined DIRTY ^(
-    echo         for /f "tokens=*" %%%%i in ^('git rev-parse HEAD'^) do set "CURRENT=%%%%i"
-    echo         git pull --quiet 2^>nul
-    echo         for /f "tokens=*" %%%%i in ^('git rev-parse HEAD'^) do set "NEW=%%%%i"
-    echo         if not "%%CURRENT%%"=="%%NEW%%" ^(
-    echo             echo Update ditemukan! Memasang...
-    echo             "%%INSTALL_DIR%%\.venv\Scripts\pip.exe" install -q . ^|^| echo Gagal update, lanjut versi lama.
-    echo         ^)
-    echo     ^)
-    echo ^)
-    echo.
+    echo if not exist "%%INSTALL_DIR%%\.git" goto run
+    echo cd /d "%%INSTALL_DIR%%"
+    echo for /f "tokens=*" %%%%i in ^('git status --porcelain 2^^^>nul'^) do set "DIRTY=%%%%i"
+    echo if defined DIRTY goto run
+    echo set "CURRENT="
+    echo for /f "tokens=*" %%%%i in ^('git rev-parse HEAD 2^^^>nul'^) do set "CURRENT=%%%%i"
+    echo git pull --quiet 2^^^>nul
+    echo set "NEW="
+    echo for /f "tokens=*" %%%%i in ^('git rev-parse HEAD 2^^^>nul'^) do set "NEW=%%%%i"
+    echo if "%%CURRENT%%"=="%%NEW%%" goto run
+    echo echo Update ditemukan - memasang versi baru...
+    echo "%%INSTALL_DIR%%\.venv\Scripts\pip.exe" install -q .
+    echo :run
     echo "%%INSTALL_DIR%%\.venv\Scripts\python.exe" -m jurnal_finder %%*
 )
 echo [OK] Perintah 'jf' siap.
@@ -164,7 +163,14 @@ for /f "tokens=2,*" %%a in ('reg query HKCU\Environment /v PATH 2^>nul ^| findst
 echo !USERPATH! | findstr /i /c:"%BIN_DIR%" >nul 2>&1
 if errorlevel 1 (
     if defined USERPATH (
-        setx PATH "!USERPATH!;%BIN_DIR%" >nul 2>&1
+        rem setx memotong nilai > 1024 char - cek panjang dulu agar PATH tidak rusak
+        powershell -NoProfile -Command "if(('!USERPATH!'.Length) -le 900){exit 0}else{exit 1}" >nul 2>&1
+        if !ERRORLEVEL! equ 0 (
+            setx PATH "!USERPATH!;%BIN_DIR%" >nul 2>&1
+        ) else (
+            echo     [!] PATH Anda terlalu panjang untuk ditambah otomatis.
+            echo         Tambahkan manual: %BIN_DIR%
+        )
     ) else (
         setx PATH "%BIN_DIR%" >nul 2>&1
     )

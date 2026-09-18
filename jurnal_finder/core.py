@@ -143,9 +143,9 @@ _STOPWORDS = {
     "dan", "yang", "pada", "untuk", "terhadap", "dengan", "studi", "analisis",
 }
 
-def normalize_title(title: str) -> str:
+def normalize_title(title) -> str:
     """Lowercase, buang tanda baca, rapikan spasi."""
-    t = (title or "").lower()
+    t = str(title or "").lower()
     t = re.sub(r"[^a-z0-9\s]", " ", t)
     return " ".join(t.split())
 
@@ -157,14 +157,14 @@ _JUNK_TITLE_RE = re.compile(
     re.IGNORECASE,
 )
 
-def is_junk_title(title: str) -> bool:
+def is_junk_title(title) -> bool:
     """True bila judul jelas bukan judul artikel (caption tabel/gambar)."""
-    t = (title or "").strip()
-    if len(t) < 8:
+    t = str(title or "").strip()
+    if len(t) < 4:
         return True
     return bool(_JUNK_TITLE_RE.match(t))
 
-def title_tokens(title: str) -> set:
+def title_tokens(title) -> set:
     """Token bermakna (buang stopword pendek) untuk perbandingan."""
     return {w for w in normalize_title(title).split() if len(w) > 2 and w not in _STOPWORDS}
 
@@ -230,7 +230,7 @@ def query_variants(kw: str) -> list[str]:
     Contoh: 'Factors influencing the intention to adopt ChatGPT in accounting'
       → ['Factors influencing ...', 'ChatGPT accounting']
     """
-    kw = (kw or "").strip()
+    kw = str(kw or "").strip()
     if not kw:
         return []
     words = re.findall(r"[A-Za-z0-9]+", kw)
@@ -314,10 +314,10 @@ def translate_id_en(text: str) -> tuple[str, str]:
 # Meliput artikel yang sama terindeks di Scopus/ScienceDirect (lengkap dgn DOI).
 # ═══════════════════════════════════════════════════════════════════════════
 def norm_openalex(w: dict) -> dict:
-    doi_raw = w.get("doi") or ""
+    doi_raw = w.get("doi") if isinstance(w.get("doi"), str) else ""
     doi = doi_raw.replace("https://doi.org/", "").strip() or None
-    authors = [{"name": a.get("author", {}).get("display_name", "?")}
-               for a in (w.get("authorships") or [])[:3]]
+    authors = [{"name": (a.get("author") or {}).get("display_name", "?") if isinstance(a.get("author"), dict) else "?"}
+               for a in (w.get("authorships") or [])[:3] if isinstance(a, dict)]
     oa = w.get("open_access") or {}
     loc = w.get("primary_location") or {}
     boa = w.get("best_oa_location") or {}
@@ -328,7 +328,7 @@ def norm_openalex(w: dict) -> dict:
     pid = f"doi:{doi.lower()}" if doi else w.get("id", "")
     topic = w.get("primary_topic") or {}
     return {
-        "paperId": pid, "title": w.get("title") or "Untitled", "authors": authors,
+        "paperId": pid, "title": w.get("title") if isinstance(w.get("title"), str) and w.get("title") else "Untitled", "authors": authors,
         "year": w.get("publication_year"), "externalIds": {"DOI": doi} if doi else {},
         "citationCount": w.get("cited_by_count", 0) or 0,
         "openAccessPdf": {"url": pdf_url} if pdf_url else None,
@@ -426,36 +426,45 @@ def search_doaj(query: str, limit: int = 10) -> list:
         return []
     results = []
     for item in data.get("results", []):
-        bib = item.get("bibjson", {})
+        if not isinstance(item, dict):
+            continue
+        bib = item.get("bibjson") or {}
+        if not isinstance(bib, dict):
+            continue
         doi = next(
-            (i.get("id") for i in bib.get("identifier", []) if i.get("type") == "doi"),
+            (i.get("id") for i in bib.get("identifier", []) or []
+             if isinstance(i, dict) and i.get("type") == "doi"),
             None,
         )
         # Ambil fulltext URL
         fulltext_url = None
-        for link in bib.get("link", []):
-            if link.get("content_type") == "PDF":
+        for link in bib.get("link", []) or []:
+            if isinstance(link, dict) and link.get("content_type") == "PDF":
                 fulltext_url = link.get("url")
                 break
         if not fulltext_url:
-            for link in bib.get("link", []):
-                if link.get("type") == "fulltext":
+            for link in bib.get("link", []) or []:
+                if isinstance(link, dict) and link.get("type") == "fulltext":
                     fulltext_url = link.get("url")
                     break
 
         # Ekstrak direct PDF download URL dari halaman OJS
         pdf_url = _extract_ojs_pdf(fulltext_url) if fulltext_url else None
 
-        authors = [{"name": a.get("name", "?")} for a in bib.get("author", [])[:3]]
+        authors = [{"name": a.get("name", "?")}
+                   for a in (bib.get("author", []) or [])[:3] if isinstance(a, dict)]
+        raw_year = str(bib.get("year") or "").split(".")[0]
+        year = int(raw_year) if raw_year.isdigit() else None
+        title = bib.get("title")
         results.append({
             "paperId": f"doi:{doi.lower()}" if doi else f"doaj:{item.get('id', '')}",
-            "title": bib.get("title") or "Untitled",
+            "title": title if isinstance(title, str) and title else "Untitled",
             "authors": authors,
-            "year": int(bib.get("year") or 0) or None,
+            "year": year,
             "externalIds": {"DOI": doi} if doi else {},
             "citationCount": 0,
             "openAccessPdf": {"url": pdf_url or fulltext_url} if (pdf_url or fulltext_url) else None,
-            "journal": bib.get("journal", {}).get("title") or "-",
+            "journal": (bib.get("journal") or {}).get("title") or "-",
             "_source": "doaj",
         })
     ok(f"DOAJ: {len(results)} artikel ditemukan")
@@ -483,7 +492,12 @@ def _extract_ojs_pdf(article_url: str) -> str | None:
         m = re.search(r'/article/view/(\d+)/(\d+)', html)
         if m:
             aid, gid = m.group(1), m.group(2)
-            base = article_url.split("/article/")[0]
+            if "/article/" in article_url:
+                base = article_url.split("/article/")[0]
+            else:
+                from urllib.parse import urlsplit
+                parts = urlsplit(article_url)
+                base = f"{parts.scheme}://{parts.netloc}"
             return f"{base}/article/download/{aid}/{gid}"
         # Pattern 3: href langsung ke PDF
         m = re.search(r'href="([^"]*\.pdf[^"]*)"', html, re.I)
@@ -609,31 +623,37 @@ def search_crossref(query: str, limit: int = 10,
         return []
     results = []
     for item in data.get("message", {}).get("items", []):
+        if not isinstance(item, dict):
+            continue
         doi = item.get("DOI")
         title_list = item.get("title", [])
-        title = title_list[0] if title_list else "Untitled"
+        if isinstance(title_list, list) and title_list:
+            title = title_list[0] if isinstance(title_list[0], str) else "Untitled"
+        else:
+            title = title_list if isinstance(title_list, str) and title_list else "Untitled"
 
         # Authors
-        authors_raw = item.get("author", [])
-        authors = [{"name": f"{a.get('given', '')} {a.get('family', '')}".strip()} for a in authors_raw[:3]]
+        authors_raw = item.get("author", []) or []
+        authors = [{"name": f"{a.get('given', '')} {a.get('family', '')}".strip()}
+                   for a in authors_raw[:3] if isinstance(a, dict)]
 
         # Year
         year = None
         for date_field in ["published-print", "published-online"]:
-            parts = item.get(date_field, {}).get("date-parts", [[]])
+            parts = (item.get(date_field) or {}).get("date-parts") or [[]]
             if parts and parts[0] and parts[0][0]:
                 year = parts[0][0]
                 break
 
         # Journal & publisher
         cont = item.get("container-title") or item.get("short-container-title") or []
-        journal = cont[0] if cont else "-"
+        journal = cont[0] if isinstance(cont, list) and cont else (cont if isinstance(cont, str) and cont else "-")
         publisher = item.get("publisher") or ""
 
         # PDF link (jika ada)
         pdf_url = None
-        for link in item.get("link", []):
-            if "pdf" in link.get("content-type", ""):
+        for link in item.get("link", []) or []:
+            if isinstance(link, dict) and "pdf" in (link.get("content-type") or ""):
                 pdf_url = link.get("URL")
                 break
 
@@ -671,11 +691,11 @@ def crossref_pdf_by_doi(doi: str) -> str | None:
         data = resp.json()
         if not isinstance(data, dict):
             return None
-        links = data.get("message", {}).get("link", [])
+        links = (data.get("message") or {}).get("link") or []
         for link in links:
-            if "pdf" in (link.get("content-type") or ""):
+            if isinstance(link, dict) and "pdf" in (link.get("content-type") or ""):
                 return link.get("URL")
-    except requests.exceptions.RequestException:
+    except (requests.exceptions.RequestException, ValueError):
         return None
     return None
 
@@ -726,19 +746,25 @@ def unpaywall_pdf_url(doi: str) -> str | None:
         )
         if resp.status_code != 200:
             return None
-        data = resp.json()
-        if not data.get("is_oa"):
+        try:
+            data = resp.json()
+        except ValueError:
+            return None
+        if not isinstance(data, dict) or not data.get("is_oa"):
             return None
         # Utamakan best_oa_location, lalu lokasi OA pertama.
         loc = data.get("best_oa_location") or {}
-        url = loc.get("url_for_pdf") or loc.get("url")
-        if url:
-            return url
-        for loc in data.get("oa_locations", []) or []:
+        if isinstance(loc, dict):
             url = loc.get("url_for_pdf") or loc.get("url")
             if url:
                 return url
-    except Exception:
+        for loc in data.get("oa_locations", []) or []:
+            if not isinstance(loc, dict):
+                continue
+            url = loc.get("url_for_pdf") or loc.get("url")
+            if url:
+                return url
+    except requests.exceptions.RequestException:
         return None
     return None
 
@@ -1448,10 +1474,18 @@ def menu_folder():
 
     print(f"Folder saat ini: {DOWNLOAD_DIR.resolve()}")
     new_dir = input("Folder baru (Enter = tetap sama): ").strip()
-    if new_dir:
-        DOWNLOAD_DIR = Path(new_dir)
-        DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    if not new_dir:
+        return
+    try:
+        cand = Path(new_dir).expanduser()
+        if cand.exists() and not cand.is_dir():
+            warn("Path itu adalah file, bukan folder. Folder tidak diubah.")
+            return
+        cand.mkdir(parents=True, exist_ok=True)
+        DOWNLOAD_DIR = cand
         ok(f"Folder diubah ke: {DOWNLOAD_DIR.resolve()}")
+    except (OSError, PermissionError) as e:
+        warn(f"Gagal memakai folder itu ({e.strerror or e}). Folder tidak diubah.")
 
 def interactive():
     global DOWNLOAD_DIR
