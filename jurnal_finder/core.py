@@ -3,9 +3,10 @@
 jurnal_finder.py - Cari & download jurnal ilmiah GRATIS (tanpa auth).
 
 Alur (dipandu, boleh Bahasa Indonesia):
-  1. Ceritakan topik / judul / variabel + pilih BIDANG → diterjemahkan ke Inggris
+  1. Ceritakan topik / judul / variabel + pilih BIDANG + (opsional) PENERBIT
+     → diterjemahkan ke Inggris
   2. Tool mencari (OpenAlex + DOAJ + CrossRef, gratis tanpa key)
-     - OpenAlex difilter per bidang (Ekonomi/Akuntansi/Manajemen/Keuangan)
+     - OpenAlex & CrossRef difilter per bidang dan/atau penerbit
   3. Download semua PDF yang bisa diakses gratis, lalu VERIFIKASI isi PDF
      (judul di halaman awal harus cocok — mencegah file salah isi)
   4. Pilihan: ekstrak semua PDF jadi tabel Excel analisis perbandingan
@@ -13,19 +14,20 @@ Alur (dipandu, boleh Bahasa Indonesia):
 Sumber pencarian (semua gratis, tanpa API key):
   - OpenAlex: ~250M paper, metadata lengkap + OA links + topik/bidang
   - DOAJ: jurnal open access, PDF langsung via OJS
-  - CrossRef: metadata dari Scopus/ScienceDirect/Emerald/dll (DOI)
+  - CrossRef: metadata dari Scopus/ScienceDirect/Emerald/dll (DOI + penerbit)
   - Unpaywall: cari PDF gratis dari DOI
   - arXiv: preprint (hanya dipakai untuk bidang "umum")
 
 Catatan sumber berlangganan (ScienceDirect, Scopus, Emerald, Wiley,
 Taylor & Francis, JSTOR, IEEE, dll) tidak bisa di-scrape otomatis tanpa
 akses kampus. Tool tetap mengambil DOI-nya, lalu mencoba PDF gratis via
-OpenAlex/Unpaywall/DOAJ; yang paywalled masuk manual_download.csv.
+OpenAlex/Unpaywall/DOAJ; yang paywalled masuk manual_download.csv
+(lengkap dengan link DOI untuk dibuka via akses kampus/perpus).
 
 Pakai:
-  python jurnal_finder.py                         # mode dipandu (disarankan)
-  python jurnal_finder.py --bidang ekonomi --topik "..."
-  python jurnal_finder.py --help                  # mode CLI
+  jf                                              # mode dipandu (disarankan)
+  jf --bidang ekonomi --penerbit elsevier --topik "..."
+  jf --help                                       # daftar opsi lengkap
 """
 
 import argparse
@@ -72,6 +74,46 @@ FIELD_PRESETS = {
     "umum":       {"label": "Semua bidang (tanpa filter)",
                    "fields": []},
 }
+
+# Penerbit yang punya fulltext sendiri. `match` = potongan nama penerbit
+# (dicek substring, tanpa beda huruf besar/kecil) di metadata CrossRef/OpenAlex.
+# Nama dicocokkan dengan beberapa varian karena CrossRef & OpenAlex berbeda
+# penamaan (mis. "Emerald Publishing Limited" vs "Emerald").
+# CATATAN: ini hanya MENYARING hasil dari penerbit tersebut; PDF-nya tetap
+# hanya bisa di-download otomatis kalau versi Open Access-nya tersedia.
+PUBLISHER_PRESETS = {
+    "elsevier":       {"label": "Elsevier / ScienceDirect",
+                       "match": ["Elsevier"]},
+    "emerald":        {"label": "Emerald Insight",
+                       "match": ["Emerald"]},
+    "wiley":          {"label": "Wiley Online Library",
+                       "match": ["Wiley", "Blackwell"]},
+    "taylor-francis": {"label": "Taylor & Francis",
+                       "match": ["Taylor & Francis", "Informa"]},
+    "springer":       {"label": "Springer / Nature",
+                       "match": ["Springer", "Nature Portfolio"]},
+    "oxford":         {"label": "Oxford Academic",
+                       "match": ["Oxford University Press", "Oxford University"]},
+    "cambridge":      {"label": "Cambridge Core",
+                       "match": ["Cambridge University Press", "Cambridge University"]},
+    "ieee":           {"label": "IEEE Xplore",
+                       "match": ["IEEE", "Institute of Electrical and Electronics"]},
+    "asce":           {"label": "ASCE",
+                       "match": ["American Society of Civil Engineers", "ASCE"]},
+    "igi":            {"label": "IGI Global",
+                       "match": ["IGI Global"]},
+    "jstor":          {"label": "JSTOR",
+                       "match": ["JSTOR"]},
+    "sage":           {"label": "SAGE",
+                       "match": ["SAGE"]},
+}
+
+# Database INDEKS / platform berlangganan: tidak punya fulltext sendiri, jadi
+# "filter penerbit" tidak berlaku. Ditampilkan hanya sebagai catatan edukasi.
+PAYWALLED_INDEXES = [
+    "Scopus", "Embase", "EBSCOhost", "ProQuest", "Westlaw",
+    "ClinicalKey", "McGraw-Hill Access",
+]
 
 # Minimal kemiripan judul (0-1) antara paper yang dicari dengan hasil cross-ref.
 TITLE_MATCH_MIN = 0.72
@@ -139,6 +181,15 @@ def field_matches(paper: dict, preset: dict) -> bool:
         if want.lower() in tname:
             return True
     return False
+
+def publisher_matches(paper: dict, preset: dict) -> bool:
+    """Cek apakah paper diterbitkan oleh penerbit yang dipilih."""
+    if not preset or not preset.get("match"):
+        return True
+    pub = (paper.get("_publisher") or "").lower()
+    if not pub:
+        return False
+    return any(want.lower() in pub for want in preset["match"])
 
 # ═══════════════════════════════════════════════════════════════════════════
 # TAHAP 1 — Translate Indonesia → Inggris (gratis: MyMemory + kamus fallback)
@@ -221,7 +272,9 @@ def norm_openalex(w: dict) -> dict:
     loc = w.get("primary_location") or {}
     boa = w.get("best_oa_location") or {}
     pdf_url = loc.get("pdf_url") or boa.get("pdf_url") or oa.get("oa_url")
-    src = (loc.get("source") or {}).get("display_name") or "-"
+    source = loc.get("source") or {}
+    src = source.get("display_name") or "-"
+    publisher = source.get("host_organization_name") or ""
     pid = f"doi:{doi.lower()}" if doi else w.get("id", "")
     topic = w.get("primary_topic") or {}
     return {
@@ -231,6 +284,7 @@ def norm_openalex(w: dict) -> dict:
         "openAccessPdf": {"url": pdf_url} if pdf_url else None,
         "journal": src,
         "_source": "openalex",
+        "_publisher": publisher,
         "_topic": topic,
         "_topic_field": ((topic.get("field") or {}).get("display_name")) or "-",
         "_topic_name": topic.get("display_name") or "-",
@@ -238,9 +292,12 @@ def norm_openalex(w: dict) -> dict:
 
 def search_openalex(query: str, limit: int = 20,
                     year_start: int = None, year_end: int = None,
-                    field_preset: dict = None) -> list:
+                    field_preset: dict = None,
+                    publisher_preset: dict = None) -> list:
     info(f"Mencari: '{query}' ...")
-    params = {"search": query, "per-page": min(limit, 200),
+    # Ambil berlebih karena hasil akan disaring (bidang & penerbit).
+    fetch = min(limit * 5, 200)
+    params = {"search": query, "per-page": fetch,
               "sort": "cited_by_count:desc", "select": ",".join([
                   "id", "doi", "title", "publication_year", "authorships",
                   "cited_by_count", "open_access", "primary_location",
@@ -264,12 +321,19 @@ def search_openalex(query: str, limit: int = 20,
                 err(f"OpenAlex HTTP {resp.status_code} untuk '{query}'")
                 return []
             papers = [norm_openalex(w) for w in resp.json().get("results", [])]
-            # Filter bidang (mis. ekonomi). Ambil berlebih lalu saring.
+            # Filter bidang (mis. ekonomi) & penerbit. Ambil berlebih lalu saring.
             if field_preset and field_preset.get("fields"):
                 papers = [p for p in papers if field_matches(p, field_preset)]
-                papers = papers[:limit]
+            if publisher_preset and publisher_preset.get("match"):
+                papers = [p for p in papers if publisher_matches(p, publisher_preset)]
+            papers = papers[:limit]
+            label = []
+            if field_preset and field_preset.get("fields"):
+                label.append(f"bidang: {field_preset['label']}")
+            if publisher_preset and publisher_preset.get("match"):
+                label.append(f"penerbit: {publisher_preset['label']}")
             ok(f"Ditemukan {len(papers)} paper"
-               + (f" (bidang: {field_preset['label']})" if field_preset else ""))
+               + (f" ({'; '.join(label)})" if label else ""))
             return papers
         except requests.exceptions.RequestException as e:
             err(f"Gagal search: {e}")
@@ -449,16 +513,20 @@ def search_arxiv(query: str, limit: int = 10) -> list:
 # CrossRef menyediakan metadata lengkap dari ~150M paper. Gratis tanpa key.
 # Tidak ada PDF langsung, tapi DOI-nya bisa dipakai untuk cross-reference.
 # ═══════════════════════════════════════════════════════════════════════════
-def search_crossref(query: str, limit: int = 10) -> list:
+def search_crossref(query: str, limit: int = 10,
+                    publisher_preset: dict = None) -> list:
     """Cari artikel di CrossRef. Return list dict dengan format serupa OpenAlex."""
     info(f"Mencari di CrossRef: '{query}' ...")
+    fetch = min(limit * 5, 100) if publisher_preset and publisher_preset.get("match") else min(limit, 50)
     try:
         resp = requests.get(
             CROSSREF_API,
             params={
                 "query": query,
-                "rows": min(limit, 50),
-                "select": "DOI,title,author,abstract,link,published-print,published-online",
+                "rows": fetch,
+                "select": "DOI,title,author,abstract,link,publisher,container-title,"
+                          "short-container-title,volume,issue,page,"
+                          "published-print,published-online",
             },
             headers={**HEADERS, "Accept": "application/json"},
             timeout=20,
@@ -490,6 +558,11 @@ def search_crossref(query: str, limit: int = 10) -> list:
                 year = parts[0][0]
                 break
 
+        # Journal & publisher
+        cont = item.get("container-title") or item.get("short-container-title") or []
+        journal = cont[0] if cont else "-"
+        publisher = item.get("publisher") or ""
+
         # PDF link (jika ada)
         pdf_url = None
         for link in item.get("link", []):
@@ -505,9 +578,16 @@ def search_crossref(query: str, limit: int = 10) -> list:
             "externalIds": {"DOI": doi} if doi else {},
             "citationCount": 0,
             "openAccessPdf": {"url": pdf_url} if pdf_url else None,
-            "journal": "-",
+            "journal": journal,
             "_source": "crossref",
+            "_publisher": publisher,
+            "_volume": item.get("volume"),
+            "_issue": item.get("issue"),
+            "_page": item.get("page"),
         })
+    if publisher_preset and publisher_preset.get("match"):
+        results = [r for r in results if publisher_matches(r, publisher_preset)]
+        results = results[:limit]
     ok(f"CrossRef: {len(results)} artikel ditemukan")
     return results
 
@@ -606,14 +686,16 @@ def _download_and_verify(url: str, title: str, year, outdir: Path) -> bool:
 
 
 def run_search_download(queries: list[str], limit: int, year_start: int, year_end: int,
-                        outdir: Path, field_preset: dict = None):
+                        outdir: Path, field_preset: dict = None,
+                        publisher_preset: dict = None):
     outdir.mkdir(parents=True, exist_ok=True)
     # arXiv = fisika/CS; hanya dipakai kalau tidak memfilter bidang ekonomi.
     use_arxiv = not (field_preset and field_preset.get("fields"))
     all_papers, seen = [], set()
     for kw in queries:
         for p in search_openalex(kw, limit=limit, year_start=year_start,
-                                 year_end=year_end, field_preset=field_preset):
+                                 year_end=year_end, field_preset=field_preset,
+                                 publisher_preset=publisher_preset):
             key = (p.get("externalIds") or {}).get("DOI", "") or p.get("paperId")
             if key and key not in seen:
                 seen.add(key)
@@ -629,19 +711,34 @@ def run_search_download(queries: list[str], limit: int, year_start: int, year_en
                 if key and key not in seen:
                     seen.add(key)
                     all_papers.append(p)
-        for p in search_crossref(kw, limit=limit):
+        for p in search_crossref(kw, limit=limit, publisher_preset=publisher_preset):
             key = (p.get("externalIds") or {}).get("DOI", "") or p.get("paperId")
             if key and key not in seen:
                 seen.add(key)
                 all_papers.append(p)
         time.sleep(1)
+    # Saring penerbit untuk semua sumber (DOAJ/arXiv umumnya non-penerbit besar).
+    if publisher_preset and publisher_preset.get("match"):
+        all_papers = [p for p in all_papers if publisher_matches(p, publisher_preset)]
     bold(f"\nTotal unik: {len(all_papers)} paper\n")
+    if not all_papers:
+        warn("Tidak ada paper yang cocok dengan filter Anda.")
+        tips = []
+        if field_preset and field_preset.get("fields"):
+            tips.append("coba bidang 'umum'")
+        if publisher_preset and publisher_preset.get("match"):
+            tips.append("hilangkan filter penerbit (pilih 'Semua penerbit')")
+        tips.append("pakai kata kunci yang lebih umum")
+        print("  💡 Tips: " + "; ".join(tips) + ".")
+        return outdir
     results, manual, ndone, rejected = [], [], 0, 0
     for i, paper in enumerate(all_papers, 1):
         title   = paper.get("title", "Untitled")
         year    = paper.get("year")
         authors = ", ".join(a["name"] for a in paper.get("authors", [])[:3])
         doi     = (paper.get("externalIds") or {}).get("DOI")
+        publisher = paper.get("_publisher") or "-"
+        journal = paper.get("journal") or "-"
         print(f"[{i}/{len(all_papers)}] {title[:70]}...")
         status, source = "❌ Manual", "-"
         pdf_url = (paper.get("openAccessPdf") or {}).get("url")
@@ -688,12 +785,15 @@ def run_search_download(queries: list[str], limit: int, year_start: int, year_en
                     break
 
         if status != "✅ Downloaded":
-            manual.append({"title": title, "doi": doi or "-",
-                           "year": year, "link": f"https://doi.org/{doi}" if doi else "-"})
+            manual.append({"Title": title, "Year": year or "-", "Publisher": publisher,
+                           "Journal": journal, "DOI": doi or "-",
+                           "Link DOI": f"https://doi.org/{doi}" if doi else "-",
+                           "Cara ambil": "Buka link di browser pakai akses kampus/perpus"})
         results.append({"No": i, "Title": title, "Authors": authors, "Year": year,
                         "DOI": doi or "-", "Citations": paper.get("citationCount", 0),
                         "Bidang": paper.get("_topic_field", "-"),
-                        "Journal": paper.get("journal", "-"),
+                        "Publisher": publisher,
+                        "Journal": journal,
                         "Status": status,
                         "Source": source if "Downloaded" in status else "-"})
     if results:
@@ -702,7 +802,8 @@ def run_search_download(queries: list[str], limit: int, year_start: int, year_en
             w.writeheader(); w.writerows(results)
     if manual:
         with open(outdir / "manual_download.csv", "w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=["title", "doi", "year", "link"])
+            w = csv.DictWriter(f, fieldnames=["Title", "Year", "Publisher", "Journal",
+                                              "DOI", "Link DOI", "Cara ambil"])
             w.writeheader(); w.writerows(manual)
     bold("\n═══════════════════════════════════════")
     bold("  SELESAI!")
@@ -712,6 +813,7 @@ def run_search_download(queries: list[str], limit: int, year_start: int, year_en
     info(f"Semua hasil CSV   : {outdir}/hasil_pencarian.csv")
     if manual:
         info(f"List manual (+link): {outdir}/manual_download.csv")
+        print("  ℹ️  Paper paywalled: buka kolom 'Link DOI' pakai akses kampus Anda.")
     return outdir
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1045,6 +1147,30 @@ def pilih_bidang() -> dict:
         warn("Pilihan tidak valid.")
 
 
+def pilih_penerbit() -> dict:
+    """Tanya penerbit sumber. Return preset terpilih (atau None = semua)."""
+    keys = list(PUBLISHER_PRESETS.keys())
+    bold("\nSumber penerbit (opsional — untuk mengerucut ke penerbit tertentu):")
+    print("  0. Semua penerbit (paling luas, disarankan)")
+    for i, k in enumerate(keys, 1):
+        print(f"  {i}. {PUBLISHER_PRESETS[k]['label']}")
+    print()
+    print("  ℹ️  Catatan: PDF dari penerbit besar hanya bisa di-download otomatis")
+    print("     kalau versi Open Access-nya tersedia. Sisanya masuk")
+    print("     manual_download.csv untuk Anda buka via akses kampus.\n")
+    default = "0"
+    while True:
+        p = input(f"Pilih penerbit [0-{len(keys)}] [{default}]: ").strip() or default
+        if p == "0":
+            ok("Penerbit: Semua penerbit")
+            return None
+        if p.isdigit() and 1 <= int(p) <= len(keys):
+            preset = PUBLISHER_PRESETS[keys[int(p) - 1]]
+            ok(f"Penerbit: {preset['label']}")
+            return preset
+        warn("Pilihan tidak valid.")
+
+
 def menu_cari():
     """Menu: Cari & Download Jurnal."""
     bold("\n┌─────────────────────────────────────┐")
@@ -1062,6 +1188,7 @@ def menu_cari():
     var_y = input("Variabel Y — bebas diisi/skip (Enter untuk skip): ").strip()
 
     field_preset = pilih_bidang()
+    publisher_preset = pilih_penerbit()
 
     print("\n🌐 Menerjemahkan ke Inggris...")
     topik_en, m1 = translate_id_en(topik)
@@ -1089,18 +1216,21 @@ def menu_cari():
 
     print("\n" + "─" * 45)
     bold("  Ringkasan:")
-    print(f"  🎯 Bidang  : {field_preset['label']}")
-    print(f"  🔍 Keyword : {', '.join(queries)}")
+    print(f"  🎯 Bidang   : {field_preset['label']}")
+    print(f"  🏢 Penerbit : {publisher_preset['label'] if publisher_preset else 'Semua penerbit'}")
+    print(f"  🔍 Keyword  : {', '.join(queries)}")
     if ys:
-        print(f"  📅 Tahun   : {ys} – {ye}")
-    print(f"  📄 Jumlah  : {limit} per keyword")
+        print(f"  📅 Tahun    : {ys} – {ye}")
+    print(f"  📄 Jumlah   : {limit} per keyword")
+    print("  📂 Output   : " + str(DOWNLOAD_DIR))
     print("─" * 45)
     if input("\nMulai cari + download? (y/n) [y]: ").strip().lower() == "n":
         return
 
     print()
     outdir = run_search_download(queries, limit, ys, ye, DOWNLOAD_DIR,
-                                 field_preset=field_preset)
+                                 field_preset=field_preset,
+                                 publisher_preset=publisher_preset)
 
     # Tawarkan ekstrak
     print("\nEkstrak ke Excel?")
@@ -1109,7 +1239,7 @@ def menu_cari():
     if input("  Ekstrak sekarang? (y/n) [y]: ").strip().lower() != "n":
         run_extract(outdir)
 
-    bold("\n✅ Selesai! Cek folder ~/jurnal_download/\n")
+    bold(f"\n✅ Selesai! Cek folder {outdir}/\n")
 
 def menu_ekstrak():
     """Menu: Ekstrak PDF yang sudah ada."""
@@ -1147,17 +1277,16 @@ def menu_folder():
 def interactive():
     global DOWNLOAD_DIR
     while True:
-        bold("\n╔══════════════════════════════════════════╗")
-        bold("║   📚 Jurnal Finder                      ║")
-        bold("║   Cari → Download → Analisis            ║")
-        bold("╚══════════════════════════════════════════╝\n")
+        bold("\n╔══════════════════════════════════════════════╗")
+        bold("║            📚  JURNAL FINDER                 ║")
+        bold("║   Cari jurnal gratis → Download → Excel       ║")
+        bold("╚══════════════════════════════════════════════╝\n")
 
+        print(f"  📂 Folder output : {DOWNLOAD_DIR.resolve()}")
         if DOWNLOAD_DIR.exists():
             pdf_count = len(list(DOWNLOAD_DIR.glob("*.pdf")))
-            if pdf_count > 0:
-                print(f"  📂 Folder: {DOWNLOAD_DIR.resolve()}")
-                print(f"  📄 PDF tersedia: {pdf_count}")
-                print()
+            print(f"  📄 PDF tersedia  : {pdf_count}")
+        print()
 
         print("  1  🔍  Cari & Download Jurnal")
         print("  2  📊  Ekstrak PDF → Excel")
@@ -1165,7 +1294,7 @@ def interactive():
         print("  4  ❌  Keluar")
         print()
 
-        pilihan = input("Pilih [1-4]: ").strip()
+        pilihan = input("Pilih menu [1-4]: ").strip()
 
         if pilihan == "1":
             menu_cari()
@@ -1177,31 +1306,51 @@ def interactive():
             bold("\n👋 Sampai jumpa!\n")
             break
         else:
-            warn("Pilihan tidak valid.")
+            warn("Pilihan tidak valid. Ketik angka 1-4 lalu Enter.")
 
 def main():
     parser = argparse.ArgumentParser(
-        description="📚 Jurnal Finder — cari + download + analisis (boleh Bahasa Indonesia)",
+        prog="jf",
+        description="📚 Jurnal Finder — cari & download jurnal ilmiah gratis.\n"
+                    "Tanpa login, tanpa API key. Boleh memakai Bahasa Indonesia.",
         formatter_class=argparse.RawTextHelpFormatter,
         epilog="""
-Contoh:
-  python jurnal_finder.py
-  python jurnal_finder.py --topik "pengaruh inflasi terhadap harga saham" --bidang ekonomi -n 10
-  python jurnal_finder.py --keyword-en "chatgpt adoption accounting" --bidang akuntansi
-  python jurnal_finder.py --extract-only   # ekstrak PDF yang sudah ada
+Contoh pemakaian:
+  jf                                              # mode dipandu (paling mudah)
+  jf --topik "pengaruh inflasi terhadap harga saham" --bidang ekonomi -n 10
+  jf --keyword-en "chatgpt adoption accounting" --bidang akuntansi
+  jf --topik "kecerdasan buatan" --penerbit elsevier --tahun 2020 2024
+  jf --extract-only                               # ekstrak PDF yang sudah ada
 
-Bidang tersedia: ekonomi, akuntansi, manajemen, keuangan, umum
+Cara kerja singkat:
+  1. Masukkan topik (Indonesia/Inggris) + pilih bidang + (opsional) penerbit.
+  2. Tool mencari di OpenAlex, CrossRef, DOAJ, dan download PDF yang GRATIS
+     (Open Access / Unpaywall), lalu memverifikasi isi PDF.
+  3. Paper berbayar (paywalled) dikumpulkan di manual_download.csv berisi
+     link DOI untuk Anda buka sendiri lewat akses kampus/perpustakaan.
+
+Bidang    : ekonomi, akuntansi, manajemen, keuangan, umum
+Penerbit  : elsevier, emerald, wiley, taylor-francis, springer, oxford,
+            cambridge, ieee, asce, igi, jstor, sage
         """)
-    parser.add_argument("--topik", default=None, help="Topik (boleh Indonesia, auto-translate)")
-    parser.add_argument("--x", default="", help="Variabel X")
-    parser.add_argument("--y", default="", help="Variabel Y")
-    parser.add_argument("--keyword-en", nargs="+", default=None, help="Keyword Inggris langsung (lewati translate)")
+    parser.add_argument("--topik", default=None,
+                        help="Topik/judul penelitian (boleh Bahasa Indonesia, otomatis diterjemahkan)")
+    parser.add_argument("--x", default="", help="Variabel X (opsional)")
+    parser.add_argument("--y", default="", help="Variabel Y (opsional)")
+    parser.add_argument("--keyword-en", nargs="+", default=None,
+                        help="Keyword Bahasa Inggris langsung (lewati penerjemahan)")
     parser.add_argument("--bidang", choices=list(FIELD_PRESETS.keys()), default="umum",
                         help="Bidang penelitian agar hasil mengerucut (default: umum)")
-    parser.add_argument("-n", "--limit", type=int, default=10)
-    parser.add_argument("--tahun", nargs=2, type=int, metavar=("DARI", "SAMPAI"), default=None)
-    parser.add_argument("--no-extract", action="store_true")
-    parser.add_argument("--extract-only", action="store_true", help="Hanya ekstrak PDF yang sudah ada (tidak download ulang)")
+    parser.add_argument("--penerbit", choices=list(PUBLISHER_PRESETS.keys()), default=None,
+                        help="Filter penerbit (default: semua penerbit)")
+    parser.add_argument("-n", "--limit", type=int, default=10,
+                        help="Jumlah jurnal yang diambil per keyword (default: 10)")
+    parser.add_argument("--tahun", nargs=2, type=int, metavar=("DARI", "SAMPAI"), default=None,
+                        help="Filter rentang tahun publikasi, mis. --tahun 2020 2024")
+    parser.add_argument("--no-extract", action="store_true",
+                        help="Jangan langsung ekstrak ke Excel setelah download")
+    parser.add_argument("--extract-only", action="store_true",
+                        help="Hanya ekstrak PDF yang sudah ada (tidak download ulang)")
     args = parser.parse_args()
 
     # Mode extract-only: ekstrak PDF yang sudah ada
@@ -1209,24 +1358,41 @@ Bidang tersedia: ekonomi, akuntansi, manajemen, keuangan, umum
         outdir = DOWNLOAD_DIR
         if not outdir.exists() or not list(outdir.glob("*.pdf")):
             err(f"Tidak ada PDF di {outdir}")
+            print("  Jalankan 'jf' tanpa argumen, lalu pilih menu 'Cari & Download'.")
             return
         run_extract(outdir)
         return
 
+    # Tanpa topik/keyword → mode dipandu interaktif
     if not args.topik and not args.keyword_en:
         interactive()
         return
+
     field_preset = FIELD_PRESETS[args.bidang]
+    publisher_preset = PUBLISHER_PRESETS[args.penerbit] if args.penerbit else None
     queries = args.keyword_en or []
     if args.topik and not args.keyword_en:
+        print("🌐 Menerjemahkan topik ke Inggris...")
         te, _ = translate_id_en(args.topik)
         xe, _ = translate_id_en(args.x) if args.x else ("", "")
         ye, _ = translate_id_en(args.y) if args.y else ("", "")
         queries = list(dict.fromkeys(q for q in [te, f"{xe} {ye}".strip()] if q))
+        info(f"'{args.topik}' → {queries}")
+    if not queries:
+        err("Topik kosong. Isi --topik atau --keyword-en.")
+        return
     ys, ye = (args.tahun[0], args.tahun[1]) if args.tahun else (None, None)
+    if ys and ye and ys > ye:
+        warn("Tahun 'DARI' lebih besar dari 'SAMPAI'. Rentang ditukar otomatis.")
+        ys, ye = ye, ys
+    print(f"\n🎯 Bidang   : {field_preset['label']}")
+    print(f"🏢 Penerbit : {publisher_preset['label'] if publisher_preset else 'Semua penerbit'}")
+    print(f"📂 Output   : {DOWNLOAD_DIR}\n")
     outdir = run_search_download(queries, args.limit, ys, ye, DOWNLOAD_DIR,
-                                 field_preset=field_preset)
+                                 field_preset=field_preset,
+                                 publisher_preset=publisher_preset)
     if not args.no_extract:
+        print("\nEkstrak ke Excel? (otomatis; pakai --no-extract untuk lewati)")
         run_extract(outdir)
 
 if __name__ == "__main__":
