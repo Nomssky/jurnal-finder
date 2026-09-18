@@ -13,28 +13,52 @@
 - Export hasil ke CSV
 - **100% gratis**, tidak perlu daftar atau login
 
-## Install
+## Install (mudah — cukup 1 baris)
+
+Salin **satu perintah** di bawah ini, tempel di terminal, tekan Enter.
+Installer otomatis menyiapkan semua yang dibutuhkan (termasuk Python bila belum ada).
 
 ### Linux / macOS
 
-```bash
-git clone <repo-url> ~/.jf && bash ~/.jf/install.sh
-```
-
-Atau kalau repo sudah ada di folder lain:
+Buka **Terminal**, tempel, Enter:
 
 ```bash
-bash install.sh <repo-url>   # opsional: clone/update dari remote
+curl -fsSL https://raw.githubusercontent.com/Nomssky/jurnal-finder/main/install.sh | bash
 ```
 
 ### Windows
 
-```cmd
-git clone <repo-url> %USERPROFILE%\.jf
-install.bat
+Buka **PowerShell** (klik Start → ketik "PowerShell"), tempel, Enter:
+
+```powershell
+irm https://raw.githubusercontent.com/Nomssky/jurnal-finder/main/install.ps1 | iex
 ```
 
+> Belum punya PowerShell? Bisa juga: unduh repo ini (tombol **Code → Download ZIP**),
+> ekstrak, lalu klik dua kali **`install.bat`**.
+
+Setelah selesai, **tutup lalu buka terminal baru**, dan ketik `jf`.
+
+<details>
+<summary>Instalasi manual (opsional, untuk yang sudah punya Python & git)</summary>
+
+```bash
+git clone https://github.com/Nomssky/jurnal-finder.git ~/.jf
+bash ~/.jf/install.sh
+```
+
+Atau jalankan installer langsung dari folder repo: `bash install.sh` (Linux/macOS)
+/ `install.bat` (Windows). Installer otomatis memakai Python 3.10+ yang tersedia.
+
+</details>
+
 ## Cara Pakai
+
+Setelah instalasi, **buka terminal/Command Prompt baru** lalu ketik:
+
+```bash
+jf
+```
 
 Paling mudah — mode dipandu (akan ditanya topik, bidang, penerbit, dll):
 
@@ -135,9 +159,15 @@ Scopus, Embase, EBSCOhost, ProQuest, Westlaw, ClinicalKey, McGraw-Hill Access.
 
 ## Requirements
 
-- Python 3.10+
+- **Python 3.10+** — installer akan mencoba memasangnya otomatis bila belum ada
+  (via Homebrew/apt/dnf/pacman di Linux-macOS, atau winget di Windows).
 - Tidak perlu API key
   (opsional: set variabel `UNPAYWALL_EMAIL` agar lookup Unpaywall lebih optimal)
+
+## Uninstall
+
+Hapus folder `~/.jf` (`%USERPROFILE%\.jf` di Windows) dan file perintah
+`~/.local/bin/jf`. Hasil download ada di `~/jurnal_download/` (hapus bila tidak perlu).
 
 ## License
 
