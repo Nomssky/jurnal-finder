@@ -149,6 +149,21 @@ def normalize_title(title: str) -> str:
     t = re.sub(r"[^a-z0-9\s]", " ", t)
     return " ".join(t.split())
 
+# Judul sampah dari metadata (mis. caption tabel/gambar yang salah ditaruh di
+# kolom judul oleh CrossRef). Pola: diawali "Table 1:", "Figure 2.", "Fig 3 -", dst.
+_JUNK_TITLE_RE = re.compile(
+    r"^\s*(table|figure|fig\.?|chart|scheme|appendix|eq\.?|equation)\s*"
+    r"[0-9ivxlcdm]*\s*[:.\-–—]",
+    re.IGNORECASE,
+)
+
+def is_junk_title(title: str) -> bool:
+    """True bila judul jelas bukan judul artikel (caption tabel/gambar)."""
+    t = (title or "").strip()
+    if len(t) < 8:
+        return True
+    return bool(_JUNK_TITLE_RE.match(t))
+
 def title_tokens(title: str) -> set:
     """Token bermakna (buang stopword pendek) untuk perbandingan."""
     return {w for w in normalize_title(title).split() if len(w) > 2 and w not in _STOPWORDS}
@@ -215,6 +230,9 @@ def query_variants(kw: str) -> list[str]:
     Contoh: 'Factors influencing the intention to adopt ChatGPT in accounting'
       → ['Factors influencing ...', 'ChatGPT accounting']
     """
+    kw = (kw or "").strip()
+    if not kw:
+        return []
     words = re.findall(r"[A-Za-z0-9]+", kw)
     core_words = [w for w in words if w.lower() not in _QUERY_NOISE]
     variants = [kw]
@@ -328,7 +346,7 @@ def search_openalex(query: str, limit: int = 20,
                     publisher_preset: dict = None) -> list:
     info(f"Mencari: '{query}' ...")
     # Ambil berlebih karena hasil akan disaring (bidang & penerbit).
-    fetch = min(limit * 5, 200)
+    fetch = min(max(limit, 1) * 5, 200)
     params = {"search": query, "per-page": fetch,
               "sort": "cited_by_count:desc", "select": ",".join([
                   "id", "doi", "title", "publication_year", "authorships",
@@ -352,7 +370,11 @@ def search_openalex(query: str, limit: int = 20,
             if resp.status_code != 200:
                 err(f"OpenAlex HTTP {resp.status_code} untuk '{query}'")
                 return []
-            papers = [norm_openalex(w) for w in resp.json().get("results", [])]
+            data = resp.json()
+            if not isinstance(data, dict):
+                err("OpenAlex mengirim respons tak terduga — dilewati.")
+                return []
+            papers = [norm_openalex(w) for w in data.get("results", [])]
             # Filter bidang (mis. ekonomi) & penerbit. Ambil berlebih lalu saring.
             if field_preset and field_preset.get("fields"):
                 papers = [p for p in papers if field_matches(p, field_preset)]
@@ -382,7 +404,7 @@ def search_doaj(query: str, limit: int = 10) -> list:
     try:
         resp = requests.get(
             f"{DOAJ_API}/{requests.utils.quote(query)}",
-            params={"page": 1, "pageSize": min(limit, 100)},
+            params={"page": 1, "pageSize": min(max(limit, 1), 100)},
             headers={**HEADERS, "Accept": "application/json"},
             timeout=20,
         )
@@ -398,6 +420,9 @@ def search_doaj(query: str, limit: int = 10) -> list:
         data = resp.json()
     except ValueError:
         err("DOAJ mengirim respons bukan JSON — dilewati.")
+        return []
+    if not isinstance(data, dict):
+        err("DOAJ mengirim respons tak terduga — dilewati.")
         return []
     results = []
     for item in data.get("results", []):
@@ -483,7 +508,7 @@ def search_arxiv(query: str, limit: int = 10) -> list:
     try:
         resp = requests.get(
             ARXIV_API,
-            params={"search_query": f"all:{query}", "max_results": min(limit, 50)},
+            params={"search_query": f"all:{query}", "max_results": min(max(limit, 1), 50)},
             headers=HEADERS,
             timeout=20,
         )
@@ -552,7 +577,7 @@ def search_crossref(query: str, limit: int = 10,
     """Cari artikel di CrossRef. Return list dict dengan format serupa OpenAlex."""
     info(f"Mencari di CrossRef: '{query}' ...")
     # Ambil lebih banyak dari batas akhir, karena hasil masih disaring penerbit.
-    fetch = min(max(limit * 10, 50), 100)
+    fetch = min(max(max(limit, 1) * 10, 50), 100)
     try:
         resp = requests.get(
             CROSSREF_API,
@@ -578,6 +603,9 @@ def search_crossref(query: str, limit: int = 10,
         data = resp.json()
     except ValueError:
         err("CrossRef mengirim respons bukan JSON — dilewati.")
+        return []
+    if not isinstance(data, dict):
+        err("CrossRef mengirim respons tak terduga — dilewati.")
         return []
     results = []
     for item in data.get("message", {}).get("items", []):
@@ -640,7 +668,10 @@ def crossref_pdf_by_doi(doi: str) -> str | None:
                             headers=HEADERS, timeout=15)
         if resp.status_code != 200:
             return None
-        links = resp.json().get("message", {}).get("link", [])
+        data = resp.json()
+        if not isinstance(data, dict):
+            return None
+        links = data.get("message", {}).get("link", [])
         for link in links:
             if "pdf" in (link.get("content-type") or ""):
                 return link.get("URL")
@@ -662,13 +693,16 @@ def download_pdf(url: str, filepath: Path) -> str:
         return "fail"
     try:
         resp.raise_for_status()
-        # Tolak halaman HTML (login/landing) walau status 200.
-        ctype = (resp.headers.get("Content-Type") or "").lower()
-        if "pdf" not in ctype and "octet-stream" not in ctype:
-            # Beberapa server tidak set Content-Type benar → cek byte awal nanti.
-            pass
+        # Batasi ukuran file agar URL aneh tidak memenuhi disk (maks 100 MB).
+        MAX_BYTES = 100 * 1024 * 1024
+        size = 0
         with open(filepath, "wb") as f:
             for chunk in resp.iter_content(chunk_size=8192):
+                size += len(chunk)
+                if size > MAX_BYTES:
+                    f.close()
+                    filepath.unlink(missing_ok=True)
+                    return "fail"
                 f.write(chunk)
         with open(filepath, "rb") as f:
             head = f.read(4)
@@ -708,6 +742,27 @@ def unpaywall_pdf_url(doi: str) -> str | None:
         return None
     return None
 
+def title_in_text(title: str, text: str, min_ratio: float = 0.6) -> bool:
+    """True bila kata-kata judul sebagian besar muncul di `text`.
+
+    Berbeda dari title_similarity (Jaccard simetris), di sini teks boleh jauh
+    lebih panjang daripada judul. Kita ukur fraksi token judul yang hadir di
+    teks (recall) + cek kemiripan jendela awal teks. Ini menghindari penolakan
+    keliru karena abstrak/afiliasi mengencerkan skor Jaccard.
+    """
+    tt = title_tokens(title)
+    if not tt:
+        return False
+    nt = title_tokens(text)
+    if not nt:
+        return False
+    recall = len(tt & nt) / len(tt)
+    # Urutan token judul muncul berurutan (frasa) di teks (halaman depan)?
+    norm_text = normalize_title(text)
+    norm_title = normalize_title(title)
+    phrase = norm_title[:60] in norm_text if len(norm_title) >= 12 else False
+    return recall >= min_ratio or phrase
+
 def pdf_title_matches(pdf_path: Path, expected_title: str) -> bool:
     """Validasi isi PDF: judul paper harus muncul di halaman awal.
 
@@ -719,8 +774,7 @@ def pdf_title_matches(pdf_path: Path, expected_title: str) -> bool:
     text = extract_pdf_text(pdf_path, max_chars=1500)
     if not text:
         return True  # tak bisa diverifikasi -> jangan buang
-    return title_similarity(text, expected_title) >= 0.55 or titles_match(
-        text[:400], expected_title, threshold=0.5)
+    return title_in_text(expected_title, text)
 
 def safe_filename(title: str, year=None, max_len: int = 80) -> str:
     keep = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_")
@@ -753,12 +807,38 @@ def run_search_download(queries: list[str], limit: int, year_start: int, year_en
     use_arxiv = not (field_preset and field_preset.get("fields"))
     all_papers, seen = [], set()
 
+    def _year_ok(p) -> bool:
+        """Filter tahun dipusatkan di sini karena tidak semua sumber (DOAJ,
+        arXiv, CrossRef) mendukung filter tahun di sisi API."""
+        y = p.get("year")
+        if not y:
+            return True  # tahun tidak diketahui → jangan buang
+        if year_start and y < year_start:
+            return False
+        if year_end and y > year_end:
+            return False
+        return True
+
     def _add(papers, key_field="DOI"):
         for p in papers:
+            if not _year_ok(p):
+                continue
+            if is_junk_title(p.get("title", "")):
+                continue  # buang "Table 1: ...", "Figure 2: ...", judul terlalu pendek
             key = (p.get("externalIds") or {}).get(key_field, "") or p.get("paperId")
-            if key and key not in seen:
+            # Dedup juga berdasarkan judul (normalisasi) agar paper yang sama
+            # dari sumber berbeda (mis. OpenAlex DOI vs arXiv) tidak dobel.
+            tkey = normalize_title(p.get("title", ""))
+            tkey = "title:" + tkey if len(tkey) > 15 else None
+            if (key and key in seen) or (tkey and tkey in seen):
+                continue
+            if not key and not tkey:
+                continue  # tak ada identitas sama sekali → lewati
+            if key:
                 seen.add(key)
-                all_papers.append(p)
+            if tkey:
+                seen.add(tkey)
+            all_papers.append(p)
 
     # Pakai query asli + varian ringkas agar hasil lebih luas (query panjang
     # yang auto-translate sering mendilusi relevansi).
@@ -795,7 +875,7 @@ def run_search_download(queries: list[str], limit: int, year_start: int, year_en
     for i, paper in enumerate(all_papers, 1):
         title   = paper.get("title", "Untitled")
         year    = paper.get("year")
-        authors = ", ".join(a["name"] for a in paper.get("authors", [])[:3])
+        authors = ", ".join(a.get("name", "?") for a in paper.get("authors", [])[:3])
         doi     = (paper.get("externalIds") or {}).get("DOI")
         publisher = paper.get("_publisher") or "-"
         journal = paper.get("journal") or "-"
@@ -1375,37 +1455,41 @@ def menu_folder():
 
 def interactive():
     global DOWNLOAD_DIR
-    while True:
-        bold("\n╔══════════════════════════════════════════════╗")
-        bold("║            📚  JURNAL FINDER                 ║")
-        bold("║   Cari jurnal gratis → Download → Excel       ║")
-        bold("╚══════════════════════════════════════════════╝\n")
+    try:
+        while True:
+            bold("\n╔══════════════════════════════════════════════╗")
+            bold("║            📚  JURNAL FINDER                 ║")
+            bold("║   Cari jurnal gratis → Download → Excel       ║")
+            bold("╚══════════════════════════════════════════════╝\n")
 
-        print(f"  📂 Folder output : {DOWNLOAD_DIR.resolve()}")
-        if DOWNLOAD_DIR.exists():
-            pdf_count = len(list(DOWNLOAD_DIR.glob("*.pdf")))
-            print(f"  📄 PDF tersedia  : {pdf_count}")
-        print()
+            print(f"  📂 Folder output : {DOWNLOAD_DIR.resolve()}")
+            if DOWNLOAD_DIR.exists():
+                pdf_count = len(list(DOWNLOAD_DIR.glob("*.pdf")))
+                print(f"  📄 PDF tersedia  : {pdf_count}")
+            print()
 
-        print("  1  🔍  Cari & Download Jurnal")
-        print("  2  📊  Ekstrak PDF → Excel")
-        print("  3  📁  Ganti Folder Output")
-        print("  4  ❌  Keluar")
-        print()
+            print("  1  🔍  Cari & Download Jurnal")
+            print("  2  📊  Ekstrak PDF → Excel")
+            print("  3  📁  Ganti Folder Output")
+            print("  4  ❌  Keluar")
+            print()
 
-        pilihan = input("Pilih menu [1-4]: ").strip()
+            pilihan = input("Pilih menu [1-4]: ").strip()
 
-        if pilihan == "1":
-            menu_cari()
-        elif pilihan == "2":
-            menu_ekstrak()
-        elif pilihan == "3":
-            menu_folder()
-        elif pilihan == "4":
-            bold("\n👋 Sampai jumpa!\n")
-            break
-        else:
-            warn("Pilihan tidak valid. Ketik angka 1-4 lalu Enter.")
+            if pilihan == "1":
+                menu_cari()
+            elif pilihan == "2":
+                menu_ekstrak()
+            elif pilihan == "3":
+                menu_folder()
+            elif pilihan == "4":
+                bold("\n👋 Sampai jumpa!\n")
+                break
+            else:
+                warn("Pilihan tidak valid. Ketik angka 1-4 lalu Enter.")
+    except (EOFError, KeyboardInterrupt):
+        # Ctrl+C / Ctrl+D / input tertutup → keluar dengan rapi, bukan traceback.
+        bold("\n\n👋 Sampai jumpa!\n")
 
 def main():
     parser = argparse.ArgumentParser(
@@ -1452,6 +1536,11 @@ Penerbit  : elsevier, emerald, wiley, taylor-francis, springer, oxford,
                         help="Hanya ekstrak PDF yang sudah ada (tidak download ulang)")
     args = parser.parse_args()
 
+    # Validasi: jumlah jurnal minimal 1 (nilai 0/negatif bikin slicing kacau).
+    if args.limit < 1:
+        warn(f"Jumlah jurnal --limit harus minimal 1 (diberi {args.limit}) → dipakai 1.")
+        args.limit = 1
+
     # Mode extract-only: ekstrak PDF yang sudah ada
     if args.extract_only:
         outdir = DOWNLOAD_DIR
@@ -1495,4 +1584,7 @@ Penerbit  : elsevier, emerald, wiley, taylor-francis, springer, oxford,
         run_extract(outdir)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (KeyboardInterrupt, EOFError):
+        bold("\n\n👋 Dibatalkan. Sampai jumpa!\n")
