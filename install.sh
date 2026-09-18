@@ -6,6 +6,14 @@ REPO_URL="${1:-}"
 
 echo "📦 Installing Jurnal Finder..."
 
+# ── Cek Python ──────────────────────────────────────────────────────────────
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "❌ Python3 tidak ditemukan. Install Python 3.10+ dulu."
+    echo "   Debian/Ubuntu: sudo apt install python3 python3-venv"
+    echo "   macOS        : brew install python"
+    exit 1
+fi
+
 mkdir -p "$INSTALL_DIR"
 
 # ── Ambil source code ───────────────────────────────────────────────────────
@@ -45,9 +53,16 @@ fi
 
 # ─ Setup venv + install ────────────────────────────────────────────────────
 cd "$INSTALL_DIR"
-python3 -m venv .venv
+if ! python3 -m venv .venv; then
+    echo "❌ Gagal membuat virtualenv. Pastikan paket venv terpasang"
+    echo "   (Debian/Ubuntu: sudo apt install python3-venv)."
+    exit 1
+fi
 .venv/bin/pip install -q --upgrade pip
-.venv/bin/pip install -q .
+if ! .venv/bin/pip install -q .; then
+    echo "❌ Gagal memasang dependensi. Cek koneksi internet lalu coba lagi."
+    exit 1
+fi
 
 # ─ Wrapper command dengan auto-update ──────────────────────────────────────
 mkdir -p "$HOME/.local/bin"

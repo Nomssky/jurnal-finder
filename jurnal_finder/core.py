@@ -32,6 +32,7 @@ Pakai:
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import re
@@ -269,7 +270,6 @@ def dict_translate(text: str) -> str:
     return " ".join(out.split())
 
 def _replace_ci(text: str, old: str, new: str) -> str:
-    import re
     return re.sub(re.escape(old), new, text, flags=re.IGNORECASE)
 
 def translate_id_en(text: str) -> tuple[str, str]:
@@ -394,7 +394,11 @@ def search_doaj(query: str, limit: int = 10) -> list:
         err(f"DOAJ HTTP {resp.status_code}")
         return []
 
-    data = resp.json()
+    try:
+        data = resp.json()
+    except ValueError:
+        err("DOAJ mengirim respons bukan JSON — dilewati.")
+        return []
     results = []
     for item in data.get("results", []):
         bib = item.get("bibjson", {})
@@ -442,7 +446,6 @@ def _extract_ojs_pdf(article_url: str) -> str | None:
         if resp.status_code != 200:
             return None
         html = resp.text
-        import re
         # Pattern 1: /article/download/{article_id}/{galley_id}/{...}
         m = re.search(r'href="([^"]*article/download/\d+/\d+[^"]*)"', html)
         if m:
@@ -476,7 +479,6 @@ def _extract_ojs_pdf(article_url: str) -> str | None:
 # ═══════════════════════════════════════════════════════════════════════════
 def search_arxiv(query: str, limit: int = 10) -> list:
     """Cari artikel di arXiv. Return list dict dengan format serupa OpenAlex."""
-    import re
     info(f"Mencari di arXiv: '{query}' ...")
     try:
         resp = requests.get(
@@ -572,7 +574,11 @@ def search_crossref(query: str, limit: int = 10,
         err(f"CrossRef HTTP {resp.status_code}")
         return []
 
-    data = resp.json()
+    try:
+        data = resp.json()
+    except ValueError:
+        err("CrossRef mengirim respons bukan JSON — dilewati.")
+        return []
     results = []
     for item in data.get("message", {}).get("items", []):
         doi = item.get("DOI")
@@ -620,15 +626,18 @@ def search_crossref(query: str, limit: int = 10,
         })
     if publisher_preset and publisher_preset.get("match"):
         results = [r for r in results if publisher_matches(r, publisher_preset)]
-        results = results[:limit]
+    results = results[:limit]
     ok(f"CrossRef: {len(results)} artikel ditemukan")
     return results
 
 
 def crossref_pdf_by_doi(doi: str) -> str | None:
     """Ambil link PDF (bila ada) untuk satu DOI via endpoint CrossRef langsung."""
+    if not doi:
+        return None
     try:
-        resp = requests.get(f"{CROSSREF_API}/{doi}", headers=HEADERS, timeout=15)
+        resp = requests.get(f"{CROSSREF_API}/{requests.utils.quote(doi, safe='')}",
+                            headers=HEADERS, timeout=15)
         if resp.status_code != 200:
             return None
         links = resp.json().get("message", {}).get("link", [])
@@ -717,7 +726,10 @@ def safe_filename(title: str, year=None, max_len: int = 80) -> str:
     keep = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_")
     name = "".join(c if c in keep else "_" for c in (title or ""))
     name = name[:max_len].strip() or "untitled"
-    return (f"[{year}] {name}" if year else name) + ".pdf"
+    # Judul panjang bisa terpotong sama → tambahkan hash singkat dari judul asli
+    # agar dua paper berbeda tidak saling menimpa filenya.
+    digest = hashlib.md5((title or "").encode("utf-8")).hexdigest()[:6]
+    return (f"[{year}] {name}_{digest}" if year else f"{name}_{digest}") + ".pdf"
 
 def _download_and_verify(url: str, title: str, year, outdir: Path) -> bool:
     """Download PDF ke nama file judul, lalu verifikasi isi cocok. Hapus jika mismatch."""
@@ -779,7 +791,7 @@ def run_search_download(queries: list[str], limit: int, year_start: int, year_en
         tips.append("pakai kata kunci yang lebih umum")
         print("  💡 Tips: " + "; ".join(tips) + ".")
         return outdir
-    results, manual, ndone, rejected = [], [], 0, 0
+    results, manual, ndone = [], [], 0
     for i, paper in enumerate(all_papers, 1):
         title   = paper.get("title", "Untitled")
         year    = paper.get("year")
@@ -894,14 +906,15 @@ def fallback_entry(filename: str) -> dict:
 
 def parse_offline(text: str, filename: str, csv_meta: dict = None) -> dict:
     """Ekstrak metadata dari PDF text + filename + CSV data (100% offline)."""
-    import re
     entry = fallback_entry(filename)
 
-    # ── Filename: [Year] Title.pdf → extract year + title ──
+    # ── Filename: [Year] Title_hash.pdf → extract year + title ──
     m = re.match(r"\[(\d{4})\]\s*(.+?)\.pdf", filename)
     if m:
         entry["tahun"] = m.group(1)
         raw_title = m.group(2).strip()
+        # Buang hash 6-char yang ditambahkan safe_filename (mis. "Judul_a1b2c3").
+        raw_title = re.sub(r"_[0-9a-f]{6}$", "", raw_title)
         # Bersihkan underscore jadi spasi
         raw_title = re.sub(r"[_]+", " ", raw_title).strip()
         entry["judul"] = raw_title
@@ -943,6 +956,7 @@ def parse_offline(text: str, filename: str, csv_meta: dict = None) -> dict:
         m2 = re.match(r"\[\d{4}\]\s*(.+?)\.pdf", filename)
         if m2:
             journal = m2.group(1).strip()
+            journal = re.sub(r"_[0-9a-f]{6}$", "", journal)
             journal = re.sub(r"[_]+", " ", journal).strip()
             # Jika judul sama dengan jurnal, itu bukan jurnal
             if journal != entry["judul"]:
@@ -1029,6 +1043,30 @@ def parse_offline(text: str, filename: str, csv_meta: dict = None) -> dict:
     if teori_found:
         entry["teori"] = ", ".join(teori_found[:3])
 
+    # ── Variabel X / Y: pola "X on/and Y", "effect of X on Y", "pengaruh X terhadap Y" ──
+    # Isi sederhana dari judul; berguna untuk kolom perbandingan tanpa AI.
+    var_title = entry.get("judul") or ""
+    m = re.search(r"(?:effect|impact|influence|pengaruh|dampak)\s+of\s+(.+?)\s+on\s+(.+)",
+                  var_title, re.I)
+    if not m:
+        m = re.search(r"(.+?)\s+(?:on|terhadap|and|dan)\s+(.+)", var_title, re.I)
+    if m:
+        x = m.group(1).strip(" .,:;").strip()
+        y = m.group(2).strip(" .,:;").strip()
+        if x and len(x) <= 120:
+            entry["variabel_x"] = x
+        if y and len(y) <= 120:
+            entry["variabel_y"] = y
+
+    # ── Hasil: ambil kalimat yang memuat kata hasil umum ──
+    hasil_kw = ("result", "findings", "we find", "this study finds",
+                "the results show", "menunjukkan", "hasil penelitian")
+    for line in lines:
+        low = line.lower()
+        if any(k in low for k in hasil_kw) and len(line) > 40:
+            entry["hasil"] = line[:300]
+            break
+
     return entry
 
 def build_excel(entries: list, output_path: Path, ai_mode: bool):
@@ -1078,7 +1116,10 @@ def build_excel(entries: list, output_path: Path, ai_mode: bool):
             cell.alignment = center if col in (1, 4) else left_wrap
         ws.row_dimensions[row].height = 60
     ws.freeze_panes = "B4"
-    if ai_mode:
+    from collections import Counter
+    all_x = [x.strip() for e in entries for x in (e.get("variabel_x") or "").split(",")
+             if x.strip() and x.strip() != "-"]
+    if ai_mode and all_x:
         ws2 = wb.create_sheet("Analisis Gap X")
         ws2["A1"] = "ANALISIS VARIABEL X — FREKUENSI & GAP PENELITIAN"
         ws2["A1"].font = Font(name="Arial", bold=True, size=11, color="1F4E79")
@@ -1089,9 +1130,6 @@ def build_excel(entries: list, output_path: Path, ai_mode: bool):
         ws2.column_dimensions["A"].width = 35
         ws2.column_dimensions["B"].width = 15
         ws2.column_dimensions["C"].width = 45
-        from collections import Counter
-        all_x = [x.strip() for e in entries for x in (e.get("variabel_x") or "").split(",")
-                 if x.strip() and x.strip() != "-"]
         for i, (x_var, count) in enumerate(Counter(all_x).most_common(), 1):
             row = i + 2
             fill = alt_fill if i % 2 == 0 else wht_fill
@@ -1120,12 +1158,23 @@ def run_extract(outdir: Path):
 
     info(f"Mengekstrak {len(pdfs)} PDF (offline, tanpa API key)...")
     entries = []
+    # Index metadata CSV berdasarkan nama file yang akan dihasilkan, supaya
+    # pencocokan tidak bergantung pada pemotongan string yang rapuh.
     csv_rows = {}
     csv_path = outdir / "hasil_pencarian.csv"
     if csv_path.exists():
         with open(csv_path, newline="", encoding="utf-8") as f:
             for r in csv.DictReader(f):
-                csv_rows[r.get("Title", "")[:50]] = r
+                title = r.get("Title", "")
+                year = r.get("Year")
+                # "Year" bisa "-" / kosong → samakan dengan safe_filename().
+                try:
+                    y = int(year) if year and str(year).isdigit() else None
+                except (TypeError, ValueError):
+                    y = None
+                key = safe_filename(title, y).removesuffix(".pdf")
+                csv_rows[key] = r
+                csv_rows.setdefault(title[:80], r)
     for i, pdf in enumerate(pdfs, 1):
         pdf_key = pdf.name
         # Skip jika sudah diekstrak
@@ -1134,20 +1183,7 @@ def run_extract(outdir: Path):
             continue
         print(f"[{i}/{len(pdfs)}] {pdf.name[:60]}...")
         text = extract_pdf_text(pdf)
-        # Cari metadata dari CSV — coba beberapa variasi key
-        meta = {}
-        for key_fn in [
-            lambda: pdf.name[7:57] if pdf.name.startswith("[") else pdf.name[:50],
-            lambda: pdf.name[:50],
-            lambda: pdf.name.replace(".pdf", "")[:50],
-        ]:
-            try:
-                k = key_fn()
-                if k in csv_rows:
-                    meta = csv_rows[k]
-                    break
-            except Exception:
-                continue
+        meta = csv_rows.get(pdf.stem, {})
         entry = parse_offline(text, pdf.name, meta)
         entries.append(entry)
         done_entries[pdf_key] = entry
@@ -1174,6 +1210,20 @@ def tanya(pesan: str, default=None) -> str:
         if jwb:
             return jwb
         print("  ⚠ Tidak boleh kosong, coba lagi.")
+
+def tanya_angka(pesan: str, default: int, minimum: int = None) -> int:
+    """Tanya angka dengan validasi, supaya salah ketik tidak membuat crash."""
+    while True:
+        raw = input(f"{pesan} [{default}]: ").strip() or str(default)
+        try:
+            nilai = int(raw)
+        except ValueError:
+            warn("Harus berupa angka. Coba lagi.")
+            continue
+        if minimum is not None and nilai < minimum:
+            warn(f"Minimal {minimum}. Coba lagi.")
+            continue
+        return nilai
 
 def pilih_bidang() -> dict:
     """Tanya bidang penelitian. Return preset terpilih."""
@@ -1256,9 +1306,12 @@ def menu_cari():
     pakai = input("\nFilter tahun publikasi? (y/n) [n]: ").strip().lower()
     ys, ye = None, None
     if pakai == "y":
-        ys = int(tanya("   Dari tahun", default=2019))
-        ye = int(tanya("   Sampai tahun", default=2025))
-    limit = int(tanya("Jumlah jurnal per keyword", default=10))
+        ys = tanya_angka("   Dari tahun", default=2019)
+        ye = tanya_angka("   Sampai tahun", default=2025)
+        if ys > ye:
+            warn("Tahun 'Dari' lebih besar dari 'Sampai'. Ditukar otomatis.")
+            ys, ye = ye, ys
+    limit = tanya_angka("Jumlah jurnal per keyword", default=10, minimum=1)
 
     print("\n" + "─" * 45)
     bold("  Ringkasan:")

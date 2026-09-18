@@ -16,7 +16,6 @@ dependencies = [
     "requests>=2.31.0",
     "openpyxl>=3.1.0",
     "pypdf>=4.0.0",
-    "pdfminer.six>=20221105",
 ]
 
 [project.scripts]
@@ -24,7 +23,7 @@ jurnal-finder = "jurnal_finder.cli:main"
 jf = "jurnal_finder.cli:main"
 
 [project.urls]
-Repository = "https://github.com/user/jurnal-finder"
+Repository = "https://github.com/Nomssky/jurnal-finder"
 
 [tool.setuptools.packages.find]
 where = ["."]
