@@ -908,8 +908,10 @@ def run_search_download(queries: list[str], limit: int, year_start: int, year_en
         print(f"[{i}/{len(all_papers)}] {title[:70]}...")
         status, source = "❌ Manual", "-"
         pdf_url = (paper.get("openAccessPdf") or {}).get("url")
-        if pdf_url and paper.get("_source") in ("doaj", "arxiv"):
-            source = {"doaj": "DOAJ", "arxiv": "arXiv"}.get(paper.get("_source"), "Open Access")
+        if pdf_url:
+            src_label = {"doaj": "DOAJ", "arxiv": "arXiv", "openalex": "OpenAlex"}.get(
+                paper.get("_source"), "Open Access")
+            source = src_label
 
         # ── 1. Coba download dari URL yang sudah ada ──
         if pdf_url:
