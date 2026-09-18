@@ -3,28 +3,36 @@
 jurnal_finder.py - Cari & download jurnal ilmiah GRATIS (tanpa auth).
 
 Alur (dipandu, boleh Bahasa Indonesia):
-  1. Ceritakan topik / judul / variabel  → otomatis diterjemahkan ke Inggris (gratis)
-  2. Tool mencari (OpenAlex + DOAJ + arXiv + CrossRef, gratis tanpa key)
-  3. Download semua PDF yang bisa diakses gratis
+  1. Ceritakan topik / judul / variabel + pilih BIDANG → diterjemahkan ke Inggris
+  2. Tool mencari (OpenAlex + DOAJ + CrossRef, gratis tanpa key)
+     - OpenAlex difilter per bidang (Ekonomi/Akuntansi/Manajemen/Keuangan)
+  3. Download semua PDF yang bisa diakses gratis, lalu VERIFIKASI isi PDF
+     (judul di halaman awal harus cocok — mencegah file salah isi)
   4. Pilihan: ekstrak semua PDF jadi tabel Excel analisis perbandingan
 
 Sumber pencarian (semua gratis, tanpa API key):
-  - OpenAlex: ~250M paper, metadata lengkap + OA links
+  - OpenAlex: ~250M paper, metadata lengkap + OA links + topik/bidang
   - DOAJ: jurnal open access, PDF langsung via OJS
-  - arXiv: preprint Komputer, AI, Matematika, Fisika
-  - CrossRef: metadata dari Scopus/ScienceDirect, DOI + cross-ref
+  - CrossRef: metadata dari Scopus/ScienceDirect/Emerald/dll (DOI)
+  - Unpaywall: cari PDF gratis dari DOI
+  - arXiv: preprint (hanya dipakai untuk bidang "umum")
 
-Download: hanya dari sumber yang menyediakan PDF gratis.
-Tidak perlu login, API key, atau email.
+Catatan sumber berlangganan (ScienceDirect, Scopus, Emerald, Wiley,
+Taylor & Francis, JSTOR, IEEE, dll) tidak bisa di-scrape otomatis tanpa
+akses kampus. Tool tetap mengambil DOI-nya, lalu mencoba PDF gratis via
+OpenAlex/Unpaywall/DOAJ; yang paywalled masuk manual_download.csv.
 
 Pakai:
-  python jurnal_finder.py            # mode dipandu (disarankan)
-  python jurnal_finder.py --help     # mode CLI
+  python jurnal_finder.py                         # mode dipandu (disarankan)
+  python jurnal_finder.py --bidang ekonomi --topik "..."
+  python jurnal_finder.py --help                  # mode CLI
 """
 
 import argparse
 import csv
 import json
+import os
+import re
 import time
 from pathlib import Path
 
@@ -36,10 +44,37 @@ MYMEMORY_API   = "https://api.mymemory.translated.net/get"
 DOAJ_API       = "https://doaj.org/api/search/articles"
 ARXIV_API      = "https://export.arxiv.org/api/query"
 CROSSREF_API   = "https://api.crossref.org/works"
+UNPAYWALL_API  = "https://api.unpaywall.org/v2"
 
 DOWNLOAD_DIR = Path.home() / "jurnal_download"
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
+
+# Email untuk Unpaywall (wajib per aturan mereka, dipakai untuk cari PDF gratis dari DOI).
+UNPAYWALL_EMAIL = os.getenv("UNPAYWALL_EMAIL", "jurnal-finder@example.com")
+
+# Bidang OpenAlex -> filter topic. `fields` = nama field OpenAlex yang lolos.
+# "Decision Sciences" & "Social Sciences" disertakan pada sebagian bidang karena
+# banyak riset adopsi teknologi/perilaku organisasi terklasifikasi di sana.
+FIELD_PRESETS = {
+    "ekonomi":    {"label": "Ekonomi / Ekonomi Pembangunan",
+                   "fields": ["Economics, Econometrics and Finance"]},
+    "akuntansi":  {"label": "Akuntansi",
+                   "fields": ["Business, Management and Accounting",
+                              "Economics, Econometrics and Finance",
+                              "Decision Sciences"]},
+    "manajemen":  {"label": "Manajemen / Bisnis",
+                   "fields": ["Business, Management and Accounting",
+                              "Decision Sciences"]},
+    "keuangan":   {"label": "Keuangan / Perbankan",
+                   "fields": ["Economics, Econometrics and Finance",
+                              "Business, Management and Accounting"]},
+    "umum":       {"label": "Semua bidang (tanpa filter)",
+                   "fields": []},
+}
+
+# Minimal kemiripan judul (0-1) antara paper yang dicari dengan hasil cross-ref.
+TITLE_MATCH_MIN = 0.72
 
 # ── Colors ─────────────────────────────────────────────────────────────────
 class C:
@@ -55,6 +90,55 @@ def warn(msg):  print(f"{C.YELLOW}⚠{C.RESET} {msg}")
 def err(msg):   print(f"{C.RED}✗{C.RESET} {msg}")
 def info(msg):  print(f"{C.CYAN}→{C.RESET} {msg}")
 def bold(msg):  print(f"{C.BOLD}{msg}{C.RESET}")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# UTIL — Normalisasi & pencocokan judul (untuk mencegah file salah isi)
+# ═══════════════════════════════════════════════════════════════════════════
+_STOPWORDS = {
+    "a", "an", "the", "of", "on", "in", "to", "and", "for", "with", "using",
+    "study", "research", "analysis", "effect", "effects", "toward", "towards",
+    "dan", "yang", "pada", "untuk", "terhadap", "dengan", "studi", "analisis",
+}
+
+def normalize_title(title: str) -> str:
+    """Lowercase, buang tanda baca, rapikan spasi."""
+    t = (title or "").lower()
+    t = re.sub(r"[^a-z0-9\s]", " ", t)
+    return " ".join(t.split())
+
+def title_tokens(title: str) -> set:
+    """Token bermakna (buang stopword pendek) untuk perbandingan."""
+    return {w for w in normalize_title(title).split() if len(w) > 2 and w not in _STOPWORDS}
+
+def title_similarity(a: str, b: str) -> float:
+    """Kemiripan 0-1 berbasis Jaccard + bonus substring (judul singkat)."""
+    ta, tb = title_tokens(a), title_tokens(b)
+    if not ta or not tb:
+        return 0.0
+    jaccard = len(ta & tb) / len(ta | tb)
+    na, nb = normalize_title(a), normalize_title(b)
+    # Bonus jika salah satu judul termuat di judul lain (judul dipotong dsb.)
+    if na and nb and (na in nb or nb in na):
+        jaccard = max(jaccard, 0.9)
+    return jaccard
+
+def titles_match(a: str, b: str, threshold: float = TITLE_MATCH_MIN) -> bool:
+    return title_similarity(a, b) >= threshold
+
+def field_matches(paper: dict, preset: dict) -> bool:
+    """Cek apakah paper masuk bidang yang dipilih (via primary_topic OpenAlex)."""
+    if not preset or not preset.get("fields"):
+        return True
+    topic = paper.get("_topic") or {}
+    field = (topic.get("field") or {}).get("display_name") or ""
+    if field in preset.get("fields", []):
+        return True
+    # Refinement opsional: kecocokan nama topic juga diterima.
+    tname = (topic.get("display_name") or "").lower()
+    for want in preset.get("topics", []) or []:
+        if want.lower() in tname:
+            return True
+    return False
 
 # ═══════════════════════════════════════════════════════════════════════════
 # TAHAP 1 — Translate Indonesia → Inggris (gratis: MyMemory + kamus fallback)
@@ -139,22 +223,28 @@ def norm_openalex(w: dict) -> dict:
     pdf_url = loc.get("pdf_url") or boa.get("pdf_url") or oa.get("oa_url")
     src = (loc.get("source") or {}).get("display_name") or "-"
     pid = f"doi:{doi.lower()}" if doi else w.get("id", "")
+    topic = w.get("primary_topic") or {}
     return {
         "paperId": pid, "title": w.get("title") or "Untitled", "authors": authors,
         "year": w.get("publication_year"), "externalIds": {"DOI": doi} if doi else {},
         "citationCount": w.get("cited_by_count", 0) or 0,
         "openAccessPdf": {"url": pdf_url} if pdf_url else None,
         "journal": src,
+        "_source": "openalex",
+        "_topic": topic,
+        "_topic_field": ((topic.get("field") or {}).get("display_name")) or "-",
+        "_topic_name": topic.get("display_name") or "-",
     }
 
 def search_openalex(query: str, limit: int = 20,
-                    year_start: int = None, year_end: int = None) -> list:
+                    year_start: int = None, year_end: int = None,
+                    field_preset: dict = None) -> list:
     info(f"Mencari: '{query}' ...")
     params = {"search": query, "per-page": min(limit, 200),
               "sort": "cited_by_count:desc", "select": ",".join([
                   "id", "doi", "title", "publication_year", "authorships",
                   "cited_by_count", "open_access", "primary_location",
-                  "best_oa_location"])}
+                  "best_oa_location", "primary_topic"])}
     filters = []
     if year_start:
         filters.append(f"from_publication_date:{year_start}-01-01")
@@ -174,7 +264,12 @@ def search_openalex(query: str, limit: int = 20,
                 err(f"OpenAlex HTTP {resp.status_code} untuk '{query}'")
                 return []
             papers = [norm_openalex(w) for w in resp.json().get("results", [])]
-            ok(f"Ditemukan {len(papers)} paper")
+            # Filter bidang (mis. ekonomi). Ambil berlebih lalu saring.
+            if field_preset and field_preset.get("fields"):
+                papers = [p for p in papers if field_matches(p, field_preset)]
+                papers = papers[:limit]
+            ok(f"Ditemukan {len(papers)} paper"
+               + (f" (bidang: {field_preset['label']})" if field_preset else ""))
             return papers
         except requests.exceptions.RequestException as e:
             err(f"Gagal search: {e}")
@@ -430,12 +525,17 @@ def download_pdf(url: str, filepath: Path) -> str:
         return "fail"
     try:
         resp.raise_for_status()
+        # Tolak halaman HTML (login/landing) walau status 200.
+        ctype = (resp.headers.get("Content-Type") or "").lower()
+        if "pdf" not in ctype and "octet-stream" not in ctype:
+            # Beberapa server tidak set Content-Type benar → cek byte awal nanti.
+            pass
         with open(filepath, "wb") as f:
             for chunk in resp.iter_content(chunk_size=8192):
                 f.write(chunk)
         with open(filepath, "rb") as f:
-            valid = f.read(4) == b"%PDF"
-        if not valid:
+            head = f.read(4)
+        if head != b"%PDF":
             filepath.unlink(missing_ok=True)
             return "fail"
         return "ok"
@@ -443,19 +543,77 @@ def download_pdf(url: str, filepath: Path) -> str:
         filepath.unlink(missing_ok=True)
         return "fail"
 
+def unpaywall_pdf_url(doi: str) -> str | None:
+    """Cari URL PDF gratis dari DOI via Unpaywall (butuh email yang valid)."""
+    if not doi:
+        return None
+    try:
+        resp = requests.get(
+            f"{UNPAYWALL_API}/{requests.utils.quote(doi)}",
+            params={"email": UNPAYWALL_EMAIL},
+            headers=HEADERS, timeout=20,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        if not data.get("is_oa"):
+            return None
+        # Utamakan best_oa_location, lalu lokasi OA pertama.
+        loc = data.get("best_oa_location") or {}
+        url = loc.get("url_for_pdf") or loc.get("url")
+        if url:
+            return url
+        for loc in data.get("oa_locations", []) or []:
+            url = loc.get("url_for_pdf") or loc.get("url")
+            if url:
+                return url
+    except Exception:
+        return None
+    return None
+
+def pdf_title_matches(pdf_path: Path, expected_title: str) -> bool:
+    """Validasi isi PDF: judul paper harus muncul di halaman awal.
+
+    Return True jika (a) judul cocok di teks, atau (b) teks tak bisa
+    diekstrak (jangan tolak hanya karena ekstraksi gagal).
+    """
+    if not expected_title or expected_title == "Untitled":
+        return True
+    text = extract_pdf_text(pdf_path, max_chars=1500)
+    if not text:
+        return True  # tak bisa diverifikasi -> jangan buang
+    return title_similarity(text, expected_title) >= 0.55 or titles_match(
+        text[:400], expected_title, threshold=0.5)
+
 def safe_filename(title: str, year=None, max_len: int = 80) -> str:
     keep = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -_")
     name = "".join(c if c in keep else "_" for c in (title or ""))
     name = name[:max_len].strip() or "untitled"
     return (f"[{year}] {name}" if year else name) + ".pdf"
 
+def _download_and_verify(url: str, title: str, year, outdir: Path) -> bool:
+    """Download PDF ke nama file judul, lalu verifikasi isi cocok. Hapus jika mismatch."""
+    if not url:
+        return False
+    dest = outdir / safe_filename(title, year)
+    if download_pdf(url, dest) != "ok":
+        return False
+    if not pdf_title_matches(dest, title):
+        dest.unlink(missing_ok=True)
+        warn(f"Isi PDF tidak cocok dengan judul → dibuang: {title[:60]}")
+        return False
+    return True
+
+
 def run_search_download(queries: list[str], limit: int, year_start: int, year_end: int,
-                        outdir: Path):
+                        outdir: Path, field_preset: dict = None):
     outdir.mkdir(parents=True, exist_ok=True)
+    # arXiv = fisika/CS; hanya dipakai kalau tidak memfilter bidang ekonomi.
+    use_arxiv = not (field_preset and field_preset.get("fields"))
     all_papers, seen = [], set()
     for kw in queries:
         for p in search_openalex(kw, limit=limit, year_start=year_start,
-                                 year_end=year_end):
+                                 year_end=year_end, field_preset=field_preset):
             key = (p.get("externalIds") or {}).get("DOI", "") or p.get("paperId")
             if key and key not in seen:
                 seen.add(key)
@@ -465,11 +623,12 @@ def run_search_download(queries: list[str], limit: int, year_start: int, year_en
             if key and key not in seen:
                 seen.add(key)
                 all_papers.append(p)
-        for p in search_arxiv(kw, limit=limit):
-            key = (p.get("externalIds") or {}).get("arXiv", "") or p.get("paperId")
-            if key and key not in seen:
-                seen.add(key)
-                all_papers.append(p)
+        if use_arxiv:
+            for p in search_arxiv(kw, limit=limit):
+                key = (p.get("externalIds") or {}).get("arXiv", "") or p.get("paperId")
+                if key and key not in seen:
+                    seen.add(key)
+                    all_papers.append(p)
         for p in search_crossref(kw, limit=limit):
             key = (p.get("externalIds") or {}).get("DOI", "") or p.get("paperId")
             if key and key not in seen:
@@ -477,7 +636,7 @@ def run_search_download(queries: list[str], limit: int, year_start: int, year_en
                 all_papers.append(p)
         time.sleep(1)
     bold(f"\nTotal unik: {len(all_papers)} paper\n")
-    results, manual, ndone = [], [], 0
+    results, manual, ndone, rejected = [], [], 0, 0
     for i, paper in enumerate(all_papers, 1):
         title   = paper.get("title", "Untitled")
         year    = paper.get("year")
@@ -486,43 +645,45 @@ def run_search_download(queries: list[str], limit: int, year_start: int, year_en
         print(f"[{i}/{len(all_papers)}] {title[:70]}...")
         status, source = "❌ Manual", "-"
         pdf_url = (paper.get("openAccessPdf") or {}).get("url")
-        if pdf_url:
-            src = paper.get("_source", "")
-            source = {"doaj": "DOAJ", "arxiv": "arXiv"}.get(src, "Open Access")
+        if pdf_url and paper.get("_source") in ("doaj", "arxiv"):
+            source = {"doaj": "DOAJ", "arxiv": "arXiv"}.get(paper.get("_source"), "Open Access")
 
-        # ── Coba download dari URL yang sudah ada ──
+        # ── 1. Coba download dari URL yang sudah ada ──
         if pdf_url:
-            if download_pdf(pdf_url, outdir / safe_filename(title, year)) == "ok":
-                ok("Downloaded (gratis)"); status, ndone = "✅ Downloaded", ndone + 1
-            else:
-                time.sleep(3)
-                if download_pdf(pdf_url, outdir / safe_filename(title, year)) == "ok":
-                    ok("Downloaded (gratis)"); status, ndone = "✅ Downloaded", ndone + 1
+            if _download_and_verify(pdf_url, title, year, outdir):
+                ok("Downloaded (gratis)"); status, source, ndone = "✅ Downloaded", source, ndone + 1
 
-        # ── Cross-reference: cari judul di DOAJ ──
+        # ── 2. Unpaywall: DOI → PDF gratis ──
+        if status != "✅ Downloaded" and doi:
+            upw = unpaywall_pdf_url(doi)
+            if upw and _download_and_verify(upw, title, year, outdir):
+                ok("Downloaded (Unpaywall)"); status, source, ndone = "✅ Downloaded", "Unpaywall", ndone + 1
+
+        # ── 3. Cross-ref DOAJ — WAJIB judul cocok dulu (hindari file salah isi) ──
         if status != "✅ Downloaded" and title and title != "Untitled":
-            doaj_hits = search_doaj(title[:80], limit=1)
-            for hit in doaj_hits:
+            for hit in search_doaj(title[:80], limit=3):
+                if not titles_match(hit.get("title", ""), title):
+                    continue
                 hit_url = (hit.get("openAccessPdf") or {}).get("url")
-                if hit_url and download_pdf(hit_url, outdir / safe_filename(title, year)) == "ok":
+                if _download_and_verify(hit_url, title, year, outdir):
                     ok("Downloaded (DOAJ cross-ref)"); status, source, ndone = "✅ Downloaded", "DOAJ", ndone + 1
                     break
 
-        # ── Cross-reference: cari judul di arXiv ──
-        if status != "✅ Downloaded" and title and title != "Untitled":
-            arxiv_hits = search_arxiv(title[:80], limit=1)
-            for hit in arxiv_hits:
+        # ── 4. Cross-ref arXiv (judul harus cocok) ──
+        if use_arxiv and status != "✅ Downloaded" and title and title != "Untitled":
+            for hit in search_arxiv(title[:80], limit=3):
+                if not titles_match(hit.get("title", ""), title):
+                    continue
                 hit_url = (hit.get("openAccessPdf") or {}).get("url")
-                if hit_url and download_pdf(hit_url, outdir / safe_filename(title, year)) == "ok":
+                if _download_and_verify(hit_url, title, year, outdir):
                     ok("Downloaded (arXiv cross-ref)"); status, source, ndone = "✅ Downloaded", "arXiv", ndone + 1
                     break
 
-        # ── Cross-reference: cari DOI di CrossRef untuk PDF link ──
+        # ── 5. Cross-ref CrossRef via DOI ──
         if status != "✅ Downloaded" and doi:
-            xref_hits = search_crossref(f"doi:{doi}", limit=1)
-            for hit in xref_hits:
+            for hit in search_crossref(f"doi:{doi}", limit=1):
                 hit_url = (hit.get("openAccessPdf") or {}).get("url")
-                if hit_url and download_pdf(hit_url, outdir / safe_filename(title, year)) == "ok":
+                if _download_and_verify(hit_url, title, year, outdir):
                     ok("Downloaded (CrossRef cross-ref)"); status, source, ndone = "✅ Downloaded", "CrossRef", ndone + 1
                     break
 
@@ -531,7 +692,10 @@ def run_search_download(queries: list[str], limit: int, year_start: int, year_en
                            "year": year, "link": f"https://doi.org/{doi}" if doi else "-"})
         results.append({"No": i, "Title": title, "Authors": authors, "Year": year,
                         "DOI": doi or "-", "Citations": paper.get("citationCount", 0),
-                        "Status": status, "Source": source if "Downloaded" in status else "-"})
+                        "Bidang": paper.get("_topic_field", "-"),
+                        "Journal": paper.get("journal", "-"),
+                        "Status": status,
+                        "Source": source if "Downloaded" in status else "-"})
     if results:
         with open(outdir / "hasil_pencarian.csv", "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=list(results[0].keys()))
@@ -863,18 +1027,41 @@ def tanya(pesan: str, default=None) -> str:
             return jwb
         print("  ⚠ Tidak boleh kosong, coba lagi.")
 
+def pilih_bidang() -> dict:
+    """Tanya bidang penelitian. Return preset terpilih."""
+    keys = list(FIELD_PRESETS.keys())
+    bold("\nBidang penelitian (biar hasilnya mengerucut):")
+    for i, k in enumerate(keys, 1):
+        print(f"  {i}. {FIELD_PRESETS[k]['label']}")
+    print()
+    default = "1"
+    while True:
+        p = input(f"Pilih bidang [1-{len(keys)}] [{default}]: ").strip() or default
+        if p.isdigit() and 1 <= int(p) <= len(keys):
+            chosen = keys[int(p) - 1]
+            preset = FIELD_PRESETS[chosen]
+            ok(f"Bidang: {preset['label']}")
+            return preset
+        warn("Pilihan tidak valid.")
+
+
 def menu_cari():
     """Menu: Cari & Download Jurnal."""
     bold("\n┌─────────────────────────────────────┐")
     bold("│  🔍 Cari & Download Jurnal          │")
     bold("└─────────────────────────────────────┘\n")
 
-    print("Ceritakan jurnal seperti apa yang kamu mau.")
-    print("Boleh Bahasa Indonesia — otomatis diterjemahkan.\n")
+    print("Masukkan topik/judul penelitian yang spesifik.")
+    print("Semakin spesifik, semakin relevan hasilnya.")
+    print("Contoh : 'Pengaruh inflasi terhadap harga saham perbankan'")
+    print("Contoh : 'Faktor yang mempengaruhi niat adopsi ChatGPT di akuntansi'")
+    print("Boleh Bahasa Indonesia — otomatis diterjemahkan ke Inggris.\n")
 
     topik = tanya("Topik / judul penelitian")
-    var_x = input("Variabel X (Enter untuk skip): ").strip()
-    var_y = input("Variabel Y (Enter untuk skip): ").strip()
+    var_x = input("Variabel X — bebas diisi/skip (Enter untuk skip): ").strip()
+    var_y = input("Variabel Y — bebas diisi/skip (Enter untuk skip): ").strip()
+
+    field_preset = pilih_bidang()
 
     print("\n🌐 Menerjemahkan ke Inggris...")
     topik_en, m1 = translate_id_en(topik)
@@ -893,16 +1080,16 @@ def menu_cari():
     if ubah:
         queries = [k.strip() for k in ubah.split(",") if k.strip()] or queries
 
-    print("\nFilter tahun?")
-    pakai = input("   Filter tahun? (y/n) [y]: ").strip().lower()
+    pakai = input("\nFilter tahun publikasi? (y/n) [n]: ").strip().lower()
     ys, ye = None, None
-    if pakai != "n":
-        ys = int(tanya("   Dari tahun", default=2018))
-        ye = int(tanya("   Sampai tahun", default=2024))
-    limit = int(tanya("Jurnal per keyword", default=10))
+    if pakai == "y":
+        ys = int(tanya("   Dari tahun", default=2019))
+        ye = int(tanya("   Sampai tahun", default=2025))
+    limit = int(tanya("Jumlah jurnal per keyword", default=10))
 
     print("\n" + "─" * 45)
     bold("  Ringkasan:")
+    print(f"  🎯 Bidang  : {field_preset['label']}")
     print(f"  🔍 Keyword : {', '.join(queries)}")
     if ys:
         print(f"  📅 Tahun   : {ys} – {ye}")
@@ -912,7 +1099,8 @@ def menu_cari():
         return
 
     print()
-    outdir = run_search_download(queries, limit, ys, ye, DOWNLOAD_DIR)
+    outdir = run_search_download(queries, limit, ys, ye, DOWNLOAD_DIR,
+                                 field_preset=field_preset)
 
     # Tawarkan ekstrak
     print("\nEkstrak ke Excel?")
@@ -998,14 +1186,18 @@ def main():
         epilog="""
 Contoh:
   python jurnal_finder.py
-  python jurnal_finder.py --topik "pengaruh inflasi terhadap harga saham" -n 10
-  python jurnal_finder.py --keyword-en "inflation stock prices" --no-extract
+  python jurnal_finder.py --topik "pengaruh inflasi terhadap harga saham" --bidang ekonomi -n 10
+  python jurnal_finder.py --keyword-en "chatgpt adoption accounting" --bidang akuntansi
   python jurnal_finder.py --extract-only   # ekstrak PDF yang sudah ada
+
+Bidang tersedia: ekonomi, akuntansi, manajemen, keuangan, umum
         """)
     parser.add_argument("--topik", default=None, help="Topik (boleh Indonesia, auto-translate)")
     parser.add_argument("--x", default="", help="Variabel X")
     parser.add_argument("--y", default="", help="Variabel Y")
     parser.add_argument("--keyword-en", nargs="+", default=None, help="Keyword Inggris langsung (lewati translate)")
+    parser.add_argument("--bidang", choices=list(FIELD_PRESETS.keys()), default="umum",
+                        help="Bidang penelitian agar hasil mengerucut (default: umum)")
     parser.add_argument("-n", "--limit", type=int, default=10)
     parser.add_argument("--tahun", nargs=2, type=int, metavar=("DARI", "SAMPAI"), default=None)
     parser.add_argument("--no-extract", action="store_true")
@@ -1024,6 +1216,7 @@ Contoh:
     if not args.topik and not args.keyword_en:
         interactive()
         return
+    field_preset = FIELD_PRESETS[args.bidang]
     queries = args.keyword_en or []
     if args.topik and not args.keyword_en:
         te, _ = translate_id_en(args.topik)
@@ -1031,7 +1224,8 @@ Contoh:
         ye, _ = translate_id_en(args.y) if args.y else ("", "")
         queries = list(dict.fromkeys(q for q in [te, f"{xe} {ye}".strip()] if q))
     ys, ye = (args.tahun[0], args.tahun[1]) if args.tahun else (None, None)
-    outdir = run_search_download(queries, args.limit, ys, ye, DOWNLOAD_DIR)
+    outdir = run_search_download(queries, args.limit, ys, ye, DOWNLOAD_DIR,
+                                 field_preset=field_preset)
     if not args.no_extract:
         run_extract(outdir)
 
