@@ -168,10 +168,18 @@ def titles_match(a: str, b: str, threshold: float = TITLE_MATCH_MIN) -> bool:
     return title_similarity(a, b) >= threshold
 
 def field_matches(paper: dict, preset: dict) -> bool:
-    """Cek apakah paper masuk bidang yang dipilih (via primary_topic OpenAlex)."""
+    """Cek apakah paper masuk bidang yang dipilih (via primary_topic OpenAlex).
+
+    Paper yang TIDAK punya info topik (mis. hasil CrossRef/DOAJ yang hanya
+    menyimpan DOI & penerbit) tidak bisa dinilai → dibiarkan lolos, supaya
+    sumber tanpa metadata topik tidak ikut terbuang semua.
+    """
     if not preset or not preset.get("fields"):
         return True
     topic = paper.get("_topic") or {}
+    if not topic:
+        # Tidak ada data topik → jangan buang (biar tidak salah singkirkan).
+        return True
     field = (topic.get("field") or {}).get("display_name") or ""
     if field in preset.get("fields", []):
         return True
@@ -190,6 +198,30 @@ def publisher_matches(paper: dict, preset: dict) -> bool:
     if not pub:
         return False
     return any(want.lower() in pub for want in preset["match"])
+
+# Kata umum dalam judul akademik yang biasanya mengurangi relevansi pencarian.
+_QUERY_NOISE = {
+    "factor", "factors", "influencing", "influence", "effect", "effects",
+    "impact", "impacts", "intention", "intent", "adopt", "adoption", "adopting",
+    "role", "study", "analysis", "analysing", "analyzing", "review",
+    "toward", "towards", "on", "of", "the", "in", "to", "and", "for", "with",
+    "using", "usage", "use", "based", "among", "between", "from", "a", "an",
+}
+
+def query_variants(kw: str) -> list[str]:
+    """Hasilkan query ringkas (buang kata generik) untuk memperluas pencarian.
+
+    Contoh: 'Factors influencing the intention to adopt ChatGPT in accounting'
+      → ['Factors influencing ...', 'ChatGPT accounting']
+    """
+    words = re.findall(r"[A-Za-z0-9]+", kw)
+    core_words = [w for w in words if w.lower() not in _QUERY_NOISE]
+    variants = [kw]
+    if len(core_words) >= 2:
+        short = " ".join(core_words[:6])
+        if short.lower() != kw.lower():
+            variants.append(short)
+    return variants
 
 # ═══════════════════════════════════════════════════════════════════════════
 # TAHAP 1 — Translate Indonesia → Inggris (gratis: MyMemory + kamus fallback)
@@ -517,7 +549,8 @@ def search_crossref(query: str, limit: int = 10,
                     publisher_preset: dict = None) -> list:
     """Cari artikel di CrossRef. Return list dict dengan format serupa OpenAlex."""
     info(f"Mencari di CrossRef: '{query}' ...")
-    fetch = min(limit * 5, 100) if publisher_preset and publisher_preset.get("match") else min(limit, 50)
+    # Ambil lebih banyak dari batas akhir, karena hasil masih disaring penerbit.
+    fetch = min(max(limit * 10, 50), 100)
     try:
         resp = requests.get(
             CROSSREF_API,
@@ -590,6 +623,21 @@ def search_crossref(query: str, limit: int = 10,
         results = results[:limit]
     ok(f"CrossRef: {len(results)} artikel ditemukan")
     return results
+
+
+def crossref_pdf_by_doi(doi: str) -> str | None:
+    """Ambil link PDF (bila ada) untuk satu DOI via endpoint CrossRef langsung."""
+    try:
+        resp = requests.get(f"{CROSSREF_API}/{doi}", headers=HEADERS, timeout=15)
+        if resp.status_code != 200:
+            return None
+        links = resp.json().get("message", {}).get("link", [])
+        for link in links:
+            if "pdf" in (link.get("content-type") or ""):
+                return link.get("URL")
+    except requests.exceptions.RequestException:
+        return None
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -692,30 +740,30 @@ def run_search_download(queries: list[str], limit: int, year_start: int, year_en
     # arXiv = fisika/CS; hanya dipakai kalau tidak memfilter bidang ekonomi.
     use_arxiv = not (field_preset and field_preset.get("fields"))
     all_papers, seen = [], set()
-    for kw in queries:
-        for p in search_openalex(kw, limit=limit, year_start=year_start,
-                                 year_end=year_end, field_preset=field_preset,
-                                 publisher_preset=publisher_preset):
-            key = (p.get("externalIds") or {}).get("DOI", "") or p.get("paperId")
+
+    def _add(papers, key_field="DOI"):
+        for p in papers:
+            key = (p.get("externalIds") or {}).get(key_field, "") or p.get("paperId")
             if key and key not in seen:
                 seen.add(key)
                 all_papers.append(p)
-        for p in search_doaj(kw, limit=limit):
-            key = (p.get("externalIds") or {}).get("DOI", "") or p.get("paperId")
-            if key and key not in seen:
-                seen.add(key)
-                all_papers.append(p)
+
+    # Pakai query asli + varian ringkas agar hasil lebih luas (query panjang
+    # yang auto-translate sering mendilusi relevansi).
+    search_terms = []
+    for q in queries:
+        for v in query_variants(q):
+            if v and v.lower() not in [t.lower() for t in search_terms]:
+                search_terms.append(v)
+
+    for kw in search_terms:
+        _add(search_openalex(kw, limit=limit, year_start=year_start,
+                             year_end=year_end, field_preset=field_preset,
+                             publisher_preset=publisher_preset))
+        _add(search_doaj(kw, limit=limit))
         if use_arxiv:
-            for p in search_arxiv(kw, limit=limit):
-                key = (p.get("externalIds") or {}).get("arXiv", "") or p.get("paperId")
-                if key and key not in seen:
-                    seen.add(key)
-                    all_papers.append(p)
-        for p in search_crossref(kw, limit=limit, publisher_preset=publisher_preset):
-            key = (p.get("externalIds") or {}).get("DOI", "") or p.get("paperId")
-            if key and key not in seen:
-                seen.add(key)
-                all_papers.append(p)
+            _add(search_arxiv(kw, limit=limit), key_field="arXiv")
+        _add(search_crossref(kw, limit=limit, publisher_preset=publisher_preset))
         time.sleep(1)
     # Saring penerbit untuk semua sumber (DOAJ/arXiv umumnya non-penerbit besar).
     if publisher_preset and publisher_preset.get("match"):
@@ -776,13 +824,11 @@ def run_search_download(queries: list[str], limit: int, year_start: int, year_en
                     ok("Downloaded (arXiv cross-ref)"); status, source, ndone = "✅ Downloaded", "arXiv", ndone + 1
                     break
 
-        # ── 5. Cross-ref CrossRef via DOI ──
+        # ── 5. CrossRef: ambil link PDF langsung via endpoint DOI (bukan search) ──
         if status != "✅ Downloaded" and doi:
-            for hit in search_crossref(f"doi:{doi}", limit=1):
-                hit_url = (hit.get("openAccessPdf") or {}).get("url")
-                if _download_and_verify(hit_url, title, year, outdir):
-                    ok("Downloaded (CrossRef cross-ref)"); status, source, ndone = "✅ Downloaded", "CrossRef", ndone + 1
-                    break
+            hit_url = crossref_pdf_by_doi(doi)
+            if hit_url and _download_and_verify(hit_url, title, year, outdir):
+                ok("Downloaded (CrossRef)"); status, source, ndone = "✅ Downloaded", "CrossRef", ndone + 1
 
         if status != "✅ Downloaded":
             manual.append({"Title": title, "Year": year or "-", "Publisher": publisher,
